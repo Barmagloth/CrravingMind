@@ -1,92 +1,33 @@
-# CravingMind Configuration v0.1
-
-# --- Agent ---
-agent:
-  model: "claude-haiku-4-5-20251001"
-  provider: "anthropic"  # abstraction layer
-
-# --- Judge ---
-judge:
-  model: "claude-haiku-4-5-20251001"
-  temperature: 0
-  seed: 42
-  embedding_model: "all-MiniLM-L12-v2"
-  ner_model: "en_core_web_lg"
-
-# --- Budget ---
 budget:
   base_tokens: 50000
-  circuit_breaker_pct: 0.15
-  venture_decay: 0.5  # for K = 1 + 2*exp(-decay*epoch)
-  rnd_lambda: 0.001
-  rnd_max_pct: 0.30
-  rnd_min_success_rate: 0.50
-  critical_starvation_pct: 0.10
+  circuit_breaker_pct: 0.15        # 15% of initial epoch budget per task
+  venture_decay: 0.5               # K = 1 + 2*exp(-decay*epoch)
+  rnd_lambda: 0.0001               # diminishing-returns parameter for R&D fund
+  rnd_max_pct: 0.30                # asymptote: 30% of base_tokens
+  rnd_min_success_rate: 0.50       # carry-over requires >= 50% success rate
+  critical_starvation_pct: 0.10    # "rat mode" triggers below 10% remaining
 
-# --- Phases ---
 phases:
-  phase2_start: 11
-  phase3_start: 26
+  phase2_start: 11                 # Phase 2 starts at epoch 11 (epochs 11-25)
+  phase3_start: 26                 # Phase 3 starts at epoch 26 (epochs 26+)
 
-# --- Benchmark ---
+agent:
+  provider: anthropic
+  model: claude-haiku-4-5-20251001
+  temperature: 0
+  seed: 42
+
+judge:
+  temperature: 0
+  seed: 42
+  model: claude-haiku-4-5-20251001
+
 benchmark:
-  frozen_ratio: 0.65  # 65% frozen, 35% dynamic
-  dynamic_multiplier: 1.3
-  tasks_per_epoch: 25
-  target_ratio_min: 0.2
-  target_ratio_max: 0.6
-  pass_threshold: 0.85
+  holdout_pct: 0.30
+  rotation_interval: 10            # epochs between partial holdout rotations
+  rotation_pct: 0.10               # fraction of holdout to rotate each cycle
+  graveyard_ttl: 20                # epochs before non-immutable graveyard entries expire
 
-# --- Memory ---
-memory:
-  graveyard_ttl_epochs: 20
-  bible_max_weight_pct: 0.30
-
-# --- Sandbox ---
 sandbox:
-  timeout_seconds: 5
-  allowed_imports:
-    - numpy
-    - re
-    - collections
-    - itertools
-    - functools
-    - math
-    - string
-    - textwrap
-    - json
-    - hashlib
-    - sklearn
-    - spacy
-    - nltk
-
-# --- Dashboard ---
-dashboard:
-  port: 8766  # 8765 is agent-dashboard
-  update_interval_seconds: 2
-
-# --- Scoring ---
-scoring:
-  semantic_weight: 0.5
-  entity_weight: 0.5
-  epsilon_smoothing: 0.01
-
-# --- Drift ---
-drift:
-  cusum_window: 10
-  cusum_threshold_sigma: 2.0
-
-# --- Inheritance ---
-inheritance:
-  pass_compress: true
-  pass_graveyard: true  # as advisory (inherited tag)
-  pass_bible: false
-
-# --- Logging ---
-logging:
-  level: "INFO"
-  log_dir: "runs"  # relative to run directory
-
-# --- Dedup ---
-dedup:
-  hash_prefix_length: 500
+  timeout_seconds: 30
+  memory_mb: 256
