@@ -146,3 +146,22 @@ class JudgeEvaluator(abc.ABC):
             "task_score": task_score,
             "hidden_type": hidden_type,
         }
+
+
+class ConcreteJudgeEvaluator(JudgeEvaluator):
+    """JudgeEvaluator backed by a real or mock LLM provider.
+
+    Injects a provider into the abstract ``_query_llm`` so the full
+    scoring pipeline can run without subclassing for each LLM backend.
+    """
+
+    def __init__(self, provider, config=None, **kwargs):
+        super().__init__(config=config, **kwargs)
+        self._provider = provider
+
+    def _query_llm(self, context: str, question: str) -> str:
+        messages = [
+            {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
+        ]
+        response = self._provider.chat(messages, max_tokens=256)
+        return response.content

@@ -1,3 +1,12 @@
+agent:
+  provider: anthropic
+  model: claude-sonnet-4-6
+  api_key: null  # uses ANTHROPIC_API_KEY env var
+
+phases:
+  phase2_start: 11
+  phase3_start: 26
+
 budget:
   base_tokens: 50000
   circuit_breaker_pct: 0.15
@@ -31,6 +40,14 @@ sandbox:
     - io
     - textwrap
     - unicodedata
+
+benchmark:
+  frozen_ratio: 0.7
+  target_ratio_min: 0.2
+  target_ratio_max: 0.6
+  tasks_per_epoch: 10
+  n_questions: 10
+  dynamic_ratio: 0.3
 
 judge:
   # Scoring thresholds
@@ -72,3 +89,27 @@ judge:
     model: "claude-haiku-4-5-20251001"
     temperature: 0
     seed: 42
+
+dashboard:
+  enabled: false
+  port: 8080
+
+scoring:
+  pass_threshold: 0.85  # mirrors judge.pass_threshold
+
+drift:
+  window: 10
+  sigma_multiplier: 2.0
+  rnd_reset_on_drift: true
+
+inheritance:
+  enabled: false
+  carry_graveyard: true
+  carry_compress: true
+
+logging:
+  level: INFO
+
+dedup:
+  task_prefix_length: 500
+  enabled: true
