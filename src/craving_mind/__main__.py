@@ -1,6 +1,7 @@
 """Entry point: python -m craving_mind --config config/default.yaml"""
 
 import argparse
+import json
 import logging
 import os
 import sys
@@ -65,10 +66,11 @@ def main() -> None:
     logger.info("CravingMind starting", extra={"run_dir": run_dir, "config": args.config})
 
     # Lazy imports — keep startup fast for --help.
+    from craving_mind.orchestrator.artifact_manager import ArtifactManager
     from craving_mind.orchestrator.budget import BudgetManager
+    from craving_mind.orchestrator.checkpoint import CheckpointManager
     from craving_mind.orchestrator.phases import PhaseManager
     from craving_mind.orchestrator.runner import EpochRunner
-    from craving_mind.orchestrator.checkpoint import CheckpointManager
     from craving_mind.agent.interface import AgentInterface, AnthropicProvider, MockProvider
     from craving_mind.agent.tools import ToolsRegistry
     from craving_mind.agent.memory import MemoryManager
@@ -113,18 +115,46 @@ def main() -> None:
     benchmark_loader = BenchmarkLoader(config)
     checkpoint = CheckpointManager(run_dir)
 
+    # Artifact manager (versioned exports).
+    artifacts_dir = os.path.join(run_dir, "artifacts")
+    artifact_manager = ArtifactManager(artifacts_dir)
+
     # Judge evaluator — loads ML models (embeddings + NER).
     logger.info("Loading judge evaluator (embeddings + NER)…")
     judge = ConcreteJudgeEvaluator(judge_provider, config=config)
 
     # Load benchmark tasks.
+    all_frozen: list = []
     if args.benchmark:
         logger.info("Loading benchmark", extra={"path": args.benchmark})
         all_frozen = benchmark_loader.load_frozen(args.benchmark)
         logger.info("Benchmark loaded", extra={"tasks": len(all_frozen)})
+    elif args.mock:
+        # Generate a small mock benchmark for smoke-testing with --mock.
+        logger.info("Generating mock benchmark (no --benchmark specified)")
+        from craving_mind.benchmark.generator import MockBenchmarkGenerator
+        mock_gen = MockBenchmarkGenerator(config)
+        source_records = [
+            {
+                "source_text": (
+                    f"This is mock source text number {i}. "
+                    "It contains information about various topics "
+                    "including science, history, and technology. " * 4
+                ).strip(),
+                "hidden_type": "discourse",
+            }
+            for i in range(10)
+        ]
+        for rec in source_records:
+            raw = mock_gen.generate_record(rec["source_text"], rec["hidden_type"])
+            task = dict(raw)
+            for field in ("questions", "reference_answers", "reference_entities"):
+                if isinstance(task.get(field), str):
+                    task[field] = json.loads(task[field])
+            all_frozen.append(task)
+        logger.info("Mock benchmark generated", extra={"tasks": len(all_frozen)})
     else:
         logger.warning("No --benchmark specified — running with empty task pool")
-        all_frozen = []
 
     # Resume from checkpoint if requested.
     start_epoch = 0
@@ -158,6 +188,7 @@ def main() -> None:
         token_counter=token_counter,
         logger=logger,
         run_dir=run_dir,
+        artifact_manager=artifact_manager,
     )
 
     tasks_per_epoch = config.get("benchmark", {}).get("tasks_per_epoch", 10)
@@ -187,14 +218,30 @@ def main() -> None:
         # Pass drift_detected as prev_oom proxy to suppress R&D fund on drift.
         prev_oom = result["is_oom"] or result.get("drift_detected", False)
 
+        artifact_info = ""
+        if result.get("artifact_path"):
+            artifact_info = f" | artifact=v{artifact_manager._current_version}"
+
         print(
             f"Epoch {epoch:4d} | SR={result['success_rate']:.3f} "
             f"| frozen={result['frozen_success_rate']:.3f} "
             f"| saved={result['saved_tokens']:6d} "
             f"| oom={result['is_oom']}"
+            f"{artifact_info}"
         )
 
     logger.info("Run complete", extra={"epochs_run": args.max_epochs - start_epoch})
+
+    # Print summary.
+    best = artifact_manager.get_best()
+    if best:
+        print(
+            f"\nBest artifact: v{best['version']} "
+            f"(epoch {best['epoch']}, score={best['mean_score']:.3f})"
+        )
+        print(f"  File: {best['filename']}")
+    else:
+        print("\nNo artifacts exported (compress.py unchanged or success_rate below threshold).")
 
 
 if __name__ == "__main__":

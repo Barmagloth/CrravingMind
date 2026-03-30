@@ -31,6 +31,7 @@ class EpochRunner:
         token_counter,
         logger,
         run_dir: str = "runs",
+        artifact_manager=None,
     ):
         self.config = config
         self.agent = agent_interface
@@ -46,6 +47,8 @@ class EpochRunner:
         self.token_counter = token_counter
         self.logger = logger
         self.run_dir = run_dir
+        self.artifact_manager = artifact_manager
+        self._prev_compress_code: str | None = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -222,7 +225,8 @@ class EpochRunner:
         artifact_path = None
         pass_threshold = float(self.config.get("judge", {}).get("pass_threshold", 0.85))
         if combined >= pass_threshold and not self.budget.is_oom:
-            artifact_path = self._export_artifact(epoch, combined)
+            extra = self._compute_export_metadata(completed)
+            artifact_path = self._export_artifact(epoch, combined, extra)
 
         epoch_result = {
             "epoch": epoch,
@@ -273,19 +277,79 @@ class EpochRunner:
     # Artifact export
     # ------------------------------------------------------------------
 
-    def _export_artifact(self, epoch: int, score: float) -> str | None:
-        """Copy compress.py to artifacts/ directory."""
+    def _compute_export_metadata(self, completed: list) -> dict:
+        """Compute aggregate metrics from completed tasks for artifact metadata."""
+        if not completed:
+            return {
+                "semantic_score": 0.0,
+                "entity_score": 0.0,
+                "score_by_type": {},
+                "mean_compression_ratio": 0.0,
+            }
+        n = len(completed)
+        sem = sum(r.get("semantic_score", 0.0) for r in completed) / n
+        ent = sum(r.get("entity_score", 0.0) for r in completed) / n
+        cr = sum(r.get("compression_ratio", 0.0) for r in completed) / n
+
+        by_type: dict = {}
+        for r in completed:
+            t = r.get("hidden_type", "discourse")
+            by_type.setdefault(t, []).append(r.get("task_score", 0.0))
+        score_by_type = {t: sum(v) / len(v) for t, v in by_type.items()}
+
+        return {
+            "semantic_score": sem,
+            "entity_score": ent,
+            "score_by_type": score_by_type,
+            "mean_compression_ratio": cr,
+        }
+
+    def _export_artifact(
+        self, epoch: int, score: float, extra: dict | None = None
+    ) -> str | None:
+        """Export compress.py as a versioned artifact (or plain copy if no ArtifactManager)."""
         compress_code = self.memory.read_file("compress.py")
         if not compress_code:
             return None
 
+        if self.artifact_manager is not None:
+            # Change detection: skip if compress.py hasn't changed since last export.
+            if self._prev_compress_code is not None:
+                if not self.artifact_manager.has_changed(
+                    compress_code, self._prev_compress_code
+                ):
+                    self.logger.info(
+                        "compress.py unchanged — skipping artifact export",
+                        extra={"epoch": epoch},
+                    )
+                    return None
+            self._prev_compress_code = compress_code
+
+            crav_id = getattr(self.agent, "crav_id", "Crav-001")
+            extra = extra or {}
+            metadata = {
+                "epoch": epoch,
+                "crav_id": crav_id,
+                "mean_score": score,
+                "semantic_score": extra.get("semantic_score", 0.0),
+                "entity_score": extra.get("entity_score", 0.0),
+                "score_by_type": extra.get("score_by_type", {}),
+                "mean_compression_ratio": extra.get("mean_compression_ratio", 0.0),
+                "success_rate": score,
+            }
+            entry = self.artifact_manager.export(compress_code, metadata)
+            self.logger.info(
+                "Artifact exported (versioned)",
+                extra={"artifact_path": entry["filepath"], "version": entry["version"]},
+            )
+            return entry["filepath"]
+
+        # Legacy: basic file copy (no ArtifactManager).
         artifacts_dir = os.path.join(self.run_dir, "artifacts")
         os.makedirs(artifacts_dir, exist_ok=True)
-
         filename = f"compress_epoch_{epoch}_{score:.3f}.py"
         artifact_path = os.path.join(artifacts_dir, filename)
         with open(artifact_path, "w", encoding="utf-8") as f:
             f.write(compress_code)
-
         self.logger.info("Artifact exported", extra={"artifact_path": artifact_path})
         return artifact_path
