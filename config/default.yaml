@@ -93,6 +93,7 @@ judge:
 dashboard:
   enabled: false
   port: 8080
+  update_interval_seconds: 2
 
 scoring:
   pass_threshold: 0.85  # mirrors judge.pass_threshold

@@ -13,7 +13,8 @@ dependencies = [
 [project.optional-dependencies]
 embeddings = ["sentence-transformers"]
 ner = ["spacy"]
-dev = ["pytest", "pytest-cov"]
+dashboard = ["fastapi", "uvicorn[standard]", "httpx"]
+dev = ["pytest", "pytest-cov", "httpx"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

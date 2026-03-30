@@ -47,6 +47,17 @@ def main() -> None:
         default=None,
         help="Path to frozen Parquet benchmark file",
     )
+    parser.add_argument(
+        "--dashboard",
+        action="store_true",
+        help="Start the web dashboard before running epochs",
+    )
+    parser.add_argument(
+        "--dashboard-port",
+        type=int,
+        default=None,
+        help="Dashboard port (overrides config)",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -172,6 +183,21 @@ def main() -> None:
             logger.info("Resumed from checkpoint", extra={"start_epoch": start_epoch})
         else:
             logger.warning("--resume specified but no checkpoint found; starting fresh")
+
+    # Start dashboard in a background thread if requested.
+    if args.dashboard:
+        from craving_mind.dashboard.server import DashboardServer
+        import threading
+
+        dashboard = DashboardServer(config, run_dir)
+        port = args.dashboard_port or config.get("dashboard", {}).get("port", 8080)
+        dash_thread = threading.Thread(
+            target=dashboard.start,
+            kwargs={"host": "0.0.0.0", "port": port},
+            daemon=True,
+        )
+        dash_thread.start()
+        print(f"Dashboard: http://localhost:{port}")
 
     runner = EpochRunner(
         config=config,
