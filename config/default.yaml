@@ -1,3 +1,24 @@
+sandbox:
+  timeout_seconds: 5
+  allowed_imports:
+    - numpy
+    - sklearn
+    - spacy
+    - nltk
+    - re
+    - string
+    - math
+    - collections
+    - itertools
+    - functools
+    - heapq
+    - bisect
+    - json
+    - pathlib
+    - io
+    - textwrap
+    - unicodedata
+
 judge:
   # Scoring thresholds
   pass_threshold: 0.85
