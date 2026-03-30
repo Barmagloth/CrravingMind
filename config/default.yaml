@@ -1,7 +1,9 @@
 agent:
-  provider: anthropic
+  provider: anthropic  # "anthropic" | "cli" | "mock"
   model: claude-sonnet-4-6
   api_key: null  # uses ANTHROPIC_API_KEY env var
+  # cli provider settings (used when provider: cli)
+  cli_model: haiku  # claude model alias for the CLI (haiku / sonnet / opus)
 
 phases:
   phase2_start: 11

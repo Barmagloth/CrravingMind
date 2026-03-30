@@ -1,8 +1,29 @@
 """Agent interface and abstract LLM provider."""
 
+import asyncio
 import json
+import os
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+
+try:
+    from claude_code_sdk import query as _sdk_query
+    from claude_code_sdk import ClaudeCodeOptions as _SdkOptions
+    from claude_code_sdk.types import AssistantMessage as _AssistantMessage
+    from claude_code_sdk.types import TextBlock as _TextBlock
+    from claude_code_sdk.types import ResultMessage as _ResultMessage
+    _SDK_AVAILABLE = True
+except ImportError:
+    _sdk_query = None  # type: ignore[assignment]
+    _SdkOptions = None  # type: ignore[assignment]
+    _AssistantMessage = None  # type: ignore[assignment]
+    _TextBlock = None  # type: ignore[assignment]
+    _ResultMessage = None  # type: ignore[assignment]
+    _SDK_AVAILABLE = False
+
+# Alias used in tests as patch target: craving_mind.agent.interface.query
+query = _sdk_query
 
 
 @dataclass
@@ -67,6 +88,187 @@ class AnthropicProvider(LLMProvider):
                 "output_tokens": response.usage.output_tokens,
             },
             stop_reason=response.stop_reason,
+        )
+
+
+class CLIProvider(LLMProvider):
+    """LLM provider that uses the claude CLI via claude-code-sdk.
+
+    Designed for users who have Claude Code installed but no Anthropic API key.
+    Tool calls are simulated via structured JSON in the response text.
+
+    Session continuity within an epoch is maintained by resuming the same
+    claude session via session_id, so the model retains context across turns.
+    """
+
+    _RESPONSE_SCHEMA = {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string"},
+            "tool_calls": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "arguments": {"type": "object"},
+                    },
+                    "required": ["name", "arguments"],
+                },
+            },
+        },
+        "required": ["content", "tool_calls"],
+    }
+
+    def __init__(self, model: str = "haiku"):
+        self.model = model
+        self._session_id: str | None = None
+
+    def new_session(self) -> None:
+        """Drop the current session so the next call starts fresh."""
+        self._session_id = None
+
+    def _build_prompt(
+        self, messages: list, tools: list | None, system: str
+    ) -> str:
+        """Format the full conversation + tool spec into one prompt string."""
+        parts: list[str] = []
+
+        if system:
+            parts.append(f"[SYSTEM]\n{system}\n[/SYSTEM]\n")
+
+        if tools:
+            tool_specs = json.dumps(tools, indent=2)
+            parts.append(
+                "You have access to the following tools. "
+                "When you want to call a tool, respond ONLY with a JSON object "
+                "matching this exact schema — no markdown fences, no surrounding text:\n"
+                '{"content": "<thinking or empty string>", '
+                '"tool_calls": [{"name": "<tool_name>", "arguments": {<args>}}]}\n'
+                "If you do NOT need to call a tool, respond with the same JSON schema "
+                'but with an empty tool_calls array: {"content": "<your reply>", "tool_calls": []}\n\n'
+                f"Available tools:\n{tool_specs}\n"
+            )
+        else:
+            parts.append(
+                "Respond ONLY with a JSON object: "
+                '{"content": "<your reply>", "tool_calls": []}\n'
+            )
+
+        for msg in messages:
+            role = msg["role"].upper()
+            content = msg["content"]
+            if isinstance(content, list):
+                # Tool result messages use a list of content blocks.
+                text_parts = []
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        text_parts.append(
+                            f"[Tool result for {block.get('tool_use_id', '')}]: "
+                            f"{block.get('content', '')}"
+                        )
+                    else:
+                        text_parts.append(str(block))
+                content = "\n".join(text_parts)
+            parts.append(f"[{role}]\n{content}")
+
+        parts.append("[ASSISTANT]")
+        return "\n\n".join(parts)
+
+    def _parse_response(self, raw_text: str) -> tuple[str, list]:
+        """Extract (content, tool_calls) from the model's response text.
+
+        Returns (raw_text, []) if JSON cannot be parsed, so the caller still
+        gets something useful rather than crashing.
+        """
+        text = raw_text.strip()
+
+        # Strip markdown code fences if present.
+        text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s*```$", "", text)
+        text = text.strip()
+
+        try:
+            data = json.loads(text)
+            content = data.get("content", "")
+            raw_calls = data.get("tool_calls", [])
+            tool_calls = []
+            for i, tc in enumerate(raw_calls):
+                tool_calls.append({
+                    "id": f"cli_{i:04d}",
+                    "name": tc.get("name", ""),
+                    "arguments": tc.get("arguments", {}),
+                })
+            return content, tool_calls
+        except (json.JSONDecodeError, AttributeError):
+            return raw_text, []
+
+    def chat(
+        self,
+        messages: list,
+        tools: list = None,
+        system: str = "",
+        max_tokens: int = 4096,
+    ) -> LLMResponse:
+        # `query` is the module-level alias — tests can patch it at
+        # craving_mind.agent.interface.query and this method picks it up.
+        import craving_mind.agent.interface as _mod
+        _query = _mod.query
+        if _query is None:
+            raise RuntimeError(
+                "claude-code-sdk is not installed. "
+                "Run: pip install claude-code-sdk"
+            )
+        if _SdkOptions is None:
+            raise RuntimeError(
+                "claude-code-sdk is not installed. "
+                "Run: pip install claude-code-sdk"
+            )
+
+        prompt = self._build_prompt(messages, tools, system)
+
+        # Remove CLAUDECODE so we can run nested from within a Claude Code session.
+        env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
+        options = _SdkOptions(
+            model=self.model,
+            allowed_tools=[],         # no filesystem tools — text-only
+            permission_mode="bypassPermissions",
+            env=env,
+            resume=self._session_id,
+        )
+
+        collected_text: list[str] = []
+        usage_data: dict = {}
+
+        async def _run() -> None:
+            nonlocal usage_data
+            async for msg in _query(prompt=prompt, options=options):
+                if _AssistantMessage and isinstance(msg, _AssistantMessage):
+                    for block in msg.content:
+                        if _TextBlock and isinstance(block, _TextBlock):
+                            collected_text.append(block.text)
+                elif _ResultMessage and isinstance(msg, _ResultMessage):
+                    if msg.usage:
+                        usage_data = msg.usage
+                    if msg.session_id:
+                        self._session_id = msg.session_id
+
+        asyncio.run(_run())
+
+        raw_text = "".join(collected_text)
+        content, tool_calls = self._parse_response(raw_text)
+
+        # Estimate token usage from text length if SDK didn't report it.
+        input_tokens = usage_data.get("input_tokens") or max(1, len(prompt) // 4)
+        output_tokens = usage_data.get("output_tokens") or max(1, len(raw_text) // 4)
+
+        stop_reason = "tool_use" if tool_calls else "end_turn"
+
+        return LLMResponse(
+            content=content,
+            tool_calls=tool_calls,
+            usage={"input_tokens": int(input_tokens), "output_tokens": int(output_tokens)},
+            stop_reason=stop_reason,
         )
 
 

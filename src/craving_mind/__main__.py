@@ -43,6 +43,12 @@ def main() -> None:
         help="Use mock LLM provider (no API calls)",
     )
     parser.add_argument(
+        "--provider",
+        choices=["anthropic", "cli", "mock"],
+        default=None,
+        help="LLM provider override (anthropic | cli | mock); overrides config and --mock",
+    )
+    parser.add_argument(
         "--benchmark",
         default=None,
         help="Path to frozen Parquet benchmark file",
@@ -82,7 +88,7 @@ def main() -> None:
     from craving_mind.orchestrator.checkpoint import CheckpointManager
     from craving_mind.orchestrator.phases import PhaseManager
     from craving_mind.orchestrator.runner import EpochRunner
-    from craving_mind.agent.interface import AgentInterface, AnthropicProvider, MockProvider
+    from craving_mind.agent.interface import AgentInterface, AnthropicProvider, CLIProvider, MockProvider
     from craving_mind.agent.tools import ToolsRegistry
     from craving_mind.agent.memory import MemoryManager
     from craving_mind.agent.sandbox import Sandbox
@@ -94,13 +100,22 @@ def main() -> None:
     from craving_mind.benchmark.loader import BenchmarkLoader
     from craving_mind.utils.tokens import TokenCounter
 
+    # Resolve provider: --provider flag > --mock flag > config.agent.provider.
+    agent_cfg = config.get("agent", {})
+    effective_provider = args.provider or ("mock" if args.mock else agent_cfg.get("provider", "anthropic"))
+
     # LLM providers.
-    if args.mock:
+    if effective_provider == "mock":
         provider = MockProvider()
         judge_provider = MockProvider()
         logger.info("Using mock LLM provider")
+    elif effective_provider == "cli":
+        cli_model = agent_cfg.get("cli_model", "haiku")
+        provider = CLIProvider(model=cli_model)
+        judge_llm_cfg = config.get("judge", {}).get("llm", {})
+        judge_provider = CLIProvider(model=agent_cfg.get("cli_model", "haiku"))
+        logger.info("Using CLI LLM provider", extra={"model": cli_model})
     else:
-        agent_cfg = config.get("agent", {})
         provider = AnthropicProvider(
             model=agent_cfg.get("model", "claude-sonnet-4-6"),
             api_key=agent_cfg.get("api_key"),

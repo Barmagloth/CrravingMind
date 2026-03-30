@@ -1,11 +1,13 @@
 """Tests for Phase 5: agent interface, tools registry, memory manager."""
 
+import asyncio
+import json
 import os
 import pytest
 import tempfile
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from craving_mind.agent.interface import LLMResponse, MockProvider, AgentInterface
+from craving_mind.agent.interface import CLIProvider, LLMResponse, MockProvider, AgentInterface
 from craving_mind.agent.tools import ToolsRegistry
 from craving_mind.agent.memory import MemoryManager
 from craving_mind.orchestrator.budget import BudgetManager
@@ -388,3 +390,232 @@ class TestAgentInterface:
         interface.send_task("text", 0.5)
         last_call = provider.call_history[-1]
         assert last_call["system"] == "You are Crav."
+
+
+# ---------------------------------------------------------------------------
+# CLIProvider
+# ---------------------------------------------------------------------------
+
+def _make_sdk_types(text_response: str, session_id: str = "sess-001", usage: dict = None):
+    """Build minimal SDK message objects for mocking query()."""
+    from claude_code_sdk.types import AssistantMessage, TextBlock, ResultMessage
+
+    assistant_msg = AssistantMessage(
+        content=[TextBlock(text=text_response)],
+        model="claude-haiku-4-5-20251001",
+    )
+    result_msg = ResultMessage(
+        subtype="success",
+        duration_ms=100,
+        duration_api_ms=90,
+        is_error=False,
+        num_turns=1,
+        session_id=session_id,
+        usage=usage or {"input_tokens": 20, "output_tokens": 10},
+    )
+    return [assistant_msg, result_msg]
+
+
+async def _async_gen(items):
+    for item in items:
+        yield item
+
+
+class TestCLIProvider:
+    def test_parse_response_valid_json_no_tools(self):
+        p = CLIProvider()
+        content, calls = p._parse_response('{"content": "hello", "tool_calls": []}')
+        assert content == "hello"
+        assert calls == []
+
+    def test_parse_response_valid_json_with_tool_call(self):
+        p = CLIProvider()
+        payload = json.dumps({
+            "content": "thinking",
+            "tool_calls": [{"name": "run_compress", "arguments": {"text": "hi", "target_ratio": 0.5}}],
+        })
+        content, calls = p._parse_response(payload)
+        assert content == "thinking"
+        assert len(calls) == 1
+        assert calls[0]["name"] == "run_compress"
+        assert calls[0]["id"] == "cli_0000"
+        assert calls[0]["arguments"]["target_ratio"] == 0.5
+
+    def test_parse_response_strips_markdown_fences(self):
+        p = CLIProvider()
+        fenced = '```json\n{"content": "ok", "tool_calls": []}\n```'
+        content, calls = p._parse_response(fenced)
+        assert content == "ok"
+        assert calls == []
+
+    def test_parse_response_invalid_json_returns_raw(self):
+        p = CLIProvider()
+        content, calls = p._parse_response("not json at all")
+        assert content == "not json at all"
+        assert calls == []
+
+    def test_build_prompt_includes_system(self):
+        p = CLIProvider()
+        prompt = p._build_prompt([], None, system="You are Crav.")
+        assert "You are Crav." in prompt
+
+    def test_build_prompt_includes_tool_definitions(self):
+        p = CLIProvider()
+        tools = [{"name": "run_compress", "description": "compress text"}]
+        prompt = p._build_prompt([], tools, system="")
+        assert "run_compress" in prompt
+        assert "tool_calls" in prompt
+
+    def test_build_prompt_includes_messages(self):
+        p = CLIProvider()
+        messages = [
+            {"role": "user", "content": "compress this"},
+            {"role": "assistant", "content": '{"content": "ok", "tool_calls": []}'},
+        ]
+        prompt = p._build_prompt(messages, None, system="")
+        assert "compress this" in prompt
+        assert "USER" in prompt
+        assert "ASSISTANT" in prompt
+
+    def test_build_prompt_handles_tool_result_list_content(self):
+        p = CLIProvider()
+        messages = [{
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": "tc_001", "content": '{"success": true}'},
+            ],
+        }]
+        prompt = p._build_prompt(messages, None, system="")
+        assert "tc_001" in prompt
+        assert "success" in prompt
+
+    def test_new_session_clears_session_id(self):
+        p = CLIProvider()
+        p._session_id = "old-session"
+        p.new_session()
+        assert p._session_id is None
+
+    def test_chat_returns_llm_response(self):
+        p = CLIProvider(model="haiku")
+        response_json = json.dumps({"content": "compressed text", "tool_calls": []})
+        sdk_messages = _make_sdk_types(response_json)
+
+        with patch("craving_mind.agent.interface.CLIProvider.chat") as mock_chat:
+            mock_chat.return_value = LLMResponse(
+                content="compressed text",
+                tool_calls=[],
+                usage={"input_tokens": 20, "output_tokens": 10},
+                stop_reason="end_turn",
+            )
+            resp = p.chat([{"role": "user", "content": "compress this"}])
+            # Direct test via _parse_response + manual call simulation
+        # Test via the actual parse path instead
+        content, calls = p._parse_response(response_json)
+        assert content == "compressed text"
+        assert calls == []
+
+    def test_chat_with_tool_call_via_query_mock(self):
+        """Full chat() integration with mocked SDK query."""
+        p = CLIProvider(model="haiku")
+        tool_payload = json.dumps({
+            "content": "I'll compress that",
+            "tool_calls": [{"name": "run_compress", "arguments": {"text": "hello", "target_ratio": 0.5}}],
+        })
+        sdk_messages = _make_sdk_types(tool_payload, session_id="sess-abc", usage={"input_tokens": 50, "output_tokens": 30})
+
+        async def fake_query(*, prompt, options):
+            for m in sdk_messages:
+                yield m
+
+        with patch("craving_mind.agent.interface.query", fake_query):
+            resp = p.chat(
+                messages=[{"role": "user", "content": "hello"}],
+                tools=[{"name": "run_compress"}],
+                system="You are Crav.",
+            )
+
+        assert resp.content == "I'll compress that"
+        assert len(resp.tool_calls) == 1
+        assert resp.tool_calls[0]["name"] == "run_compress"
+        assert resp.stop_reason == "tool_use"
+        assert resp.usage["input_tokens"] == 50
+        assert resp.usage["output_tokens"] == 30
+        # Session ID captured for conversation continuity
+        assert p._session_id == "sess-abc"
+
+    def test_chat_no_tools_returns_end_turn(self):
+        p = CLIProvider(model="haiku")
+        response_json = json.dumps({"content": "done", "tool_calls": []})
+        sdk_messages = _make_sdk_types(response_json)
+
+        async def fake_query(*, prompt, options):
+            for m in sdk_messages:
+                yield m
+
+        with patch("craving_mind.agent.interface.query", fake_query):
+            resp = p.chat([{"role": "user", "content": "hello"}])
+
+        assert resp.stop_reason == "end_turn"
+        assert resp.tool_calls == []
+
+    def test_chat_resumes_session_on_second_call(self):
+        p = CLIProvider(model="haiku")
+        p._session_id = "prev-session"
+
+        captured_options = {}
+
+        async def fake_query(*, prompt, options):
+            captured_options["resume"] = options.resume
+            for m in _make_sdk_types('{"content": "ok", "tool_calls": []}'):
+                yield m
+
+        with patch("craving_mind.agent.interface.query", fake_query):
+            p.chat([{"role": "user", "content": "hi"}])
+
+        assert captured_options["resume"] == "prev-session"
+
+    def test_chat_estimates_tokens_when_usage_missing(self):
+        p = CLIProvider(model="haiku")
+        from claude_code_sdk.types import AssistantMessage, TextBlock, ResultMessage
+        response_json = '{"content": "hello world", "tool_calls": []}'
+        msgs = [
+            AssistantMessage(content=[TextBlock(text=response_json)], model="haiku"),
+            ResultMessage(
+                subtype="success", duration_ms=50, duration_api_ms=40,
+                is_error=False, num_turns=1, session_id="s1",
+                usage=None,  # no usage data
+            ),
+        ]
+
+        async def fake_query(*, prompt, options):
+            for m in msgs:
+                yield m
+
+        with patch("craving_mind.agent.interface.query", fake_query):
+            resp = p.chat([{"role": "user", "content": "hi"}])
+
+        assert resp.usage["input_tokens"] >= 1
+        assert resp.usage["output_tokens"] >= 1
+
+    def test_chat_strips_claudecode_env(self):
+        """CLAUDECODE env var is removed from options.env to allow nested calls."""
+        p = CLIProvider(model="haiku")
+        captured_env = {}
+
+        async def fake_query(*, prompt, options):
+            captured_env.update(options.env)
+            for m in _make_sdk_types('{"content": "ok", "tool_calls": []}'):
+                yield m
+
+        with patch.dict(os.environ, {"CLAUDECODE": "1"}):
+            with patch("craving_mind.agent.interface.query", fake_query):
+                p.chat([{"role": "user", "content": "hi"}])
+
+        assert "CLAUDECODE" not in captured_env
+
+    def test_chat_missing_sdk_raises_runtime_error(self):
+        """When query is None (SDK not installed), chat() raises RuntimeError."""
+        p = CLIProvider()
+        with patch("craving_mind.agent.interface.query", None):
+            with pytest.raises(RuntimeError, match="claude-code-sdk"):
+                p.chat([{"role": "user", "content": "hi"}])
