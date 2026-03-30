@@ -1,30 +1,40 @@
-sandbox:
-  timeout_seconds: 5
-  allowed_imports:
-    - numpy
-    - sklearn
-    - spacy
-    - nltk
-    - re
-    - string
-    - math
-    - collections
-    - itertools
-    - functools
-    - heapq
-    - bisect
-    - json
-    - pathlib
-    - io
-    - textwrap
-    - unicodedata
-
-agent:
-  bible_max_tokens: 4000
-  graveyard_max_entries: 50
-
 judge:
+  # Scoring thresholds
   pass_threshold: 0.85
-  semantic_weight: 0.5
-  entity_weight: 0.5
-  smoke_test_texts: 10
+  task_score_weights:
+    semantic: 0.5
+    entity: 0.5
+
+  # Compression tolerance
+  ratio_tolerance: 1.05
+
+  # Epoch success_rate aggregation
+  epoch:
+    epsilon: 0.01          # epsilon-smoothing for geometric mean
+    type_weights: {}       # empty = equal weights per type
+
+  # Combined success_rate
+  dynamic_multiplier: 1.3  # weight boost for dynamic (holdout) scores
+
+  # Dedup
+  dedup:
+    task_prefix_length: 500
+
+  # Drift detection (CUSUM)
+  drift:
+    window: 10
+    sigma_multiplier: 2.0
+
+  # Embedding model
+  embeddings:
+    model_name: "sentence-transformers/all-MiniLM-L12-v2"
+
+  # NER model
+  entities:
+    model_name: "en_core_web_sm"
+
+  # LLM for benchmark QA (deterministic)
+  llm:
+    model: "claude-haiku-4-5-20251001"
+    temperature: 0
+    seed: 42

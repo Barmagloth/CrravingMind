@@ -1,41 +1,7 @@
-# Python
 __pycache__/
-*.py[cod]
-*$py.class
-*.so
-*.egg
+*.pyc
+*.pyo
 *.egg-info/
+.pytest_cache/
 dist/
 build/
-.eggs/
-*.pyo
-.Python
-pip-wheel-metadata/
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-*.pdb
-
-# Virtual environments
-.venv/
-venv/
-env/
-ENV/
-
-# Environment / secrets
-.env
-.env.local
-.env.*.local
-
-# Project outputs
-runs/
-artifacts/
-data/benchmarks/*.parquet
-
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-.DS_Store
-Thumbs.db
