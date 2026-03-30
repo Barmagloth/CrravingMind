@@ -1,33 +1,30 @@
-budget:
-  base_tokens: 50000
-  circuit_breaker_pct: 0.15        # 15% of initial epoch budget per task
-  venture_decay: 0.5               # K = 1 + 2*exp(-decay*epoch)
-  rnd_lambda: 0.0001               # diminishing-returns parameter for R&D fund
-  rnd_max_pct: 0.30                # asymptote: 30% of base_tokens
-  rnd_min_success_rate: 0.50       # carry-over requires >= 50% success rate
-  critical_starvation_pct: 0.10    # "rat mode" triggers below 10% remaining
-
-phases:
-  phase2_start: 11                 # Phase 2 starts at epoch 11 (epochs 11-25)
-  phase3_start: 26                 # Phase 3 starts at epoch 26 (epochs 26+)
+sandbox:
+  timeout_seconds: 5
+  allowed_imports:
+    - numpy
+    - sklearn
+    - spacy
+    - nltk
+    - re
+    - string
+    - math
+    - collections
+    - itertools
+    - functools
+    - heapq
+    - bisect
+    - json
+    - pathlib
+    - io
+    - textwrap
+    - unicodedata
 
 agent:
-  provider: anthropic
-  model: claude-haiku-4-5-20251001
-  temperature: 0
-  seed: 42
+  bible_max_tokens: 4000
+  graveyard_max_entries: 50
 
 judge:
-  temperature: 0
-  seed: 42
-  model: claude-haiku-4-5-20251001
-
-benchmark:
-  holdout_pct: 0.30
-  rotation_interval: 10            # epochs between partial holdout rotations
-  rotation_pct: 0.10               # fraction of holdout to rotate each cycle
-  graveyard_ttl: 20                # epochs before non-immutable graveyard entries expire
-
-sandbox:
-  timeout_seconds: 30
-  memory_mb: 256
+  pass_threshold: 0.85
+  semantic_weight: 0.5
+  entity_weight: 0.5
+  smoke_test_texts: 10
