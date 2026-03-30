@@ -1,0 +1,30 @@
+sandbox:
+  timeout_seconds: 5
+  allowed_imports:
+    - numpy
+    - sklearn
+    - spacy
+    - nltk
+    - re
+    - string
+    - math
+    - collections
+    - itertools
+    - functools
+    - heapq
+    - bisect
+    - json
+    - pathlib
+    - io
+    - textwrap
+    - unicodedata
+
+agent:
+  bible_max_tokens: 4000
+  graveyard_max_entries: 50
+
+judge:
+  pass_threshold: 0.85
+  semantic_weight: 0.5
+  entity_weight: 0.5
+  smoke_test_texts: 10
