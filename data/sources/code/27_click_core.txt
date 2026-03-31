@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+import collections.abc as cabc
+import enum
+import errno
+import inspect
+import os
+import sys
+import typing as t
+from collections import abc
+from collections import Counter
+from contextlib import AbstractContextManager
+from contextlib import contextmanager
+from contextlib import ExitStack
+from functools import update_wrapper
+from gettext import gettext as _
+from gettext import ngettext
+from itertools import repeat
+from types import TracebackType
+
+from . import types
+from ._utils import FLAG_NEEDS_VALUE
+from ._utils import UNSET
+from .exceptions import Abort
+from .exceptions import BadParameter
+from .exceptions import ClickException
+from .exceptions import Exit
+from .exceptions import MissingParameter
+from .exceptions import NoArgsIsHelpError
+from .exceptions import UsageError
+from .formatting import HelpFormatter
+from .formatting import join_options
+from .globals import pop_context
+from .globals import push_context
+from .parser import _OptionParser
+from .parser import _split_opt
+from .termui import confirm
+from .termui import prompt
+from .termui import style
+from .utils import _detect_program_name
+from .utils import _expand_args
+from .utils import echo
+from .utils import make_default_short_help
+from .utils import make_str
+from .utils import PacifyFlushWrapper
+
+if t.TYPE_CHECKING:
+    from .shell_completion import CompletionItem
+
+F = t.TypeVar("F", bound="t.Callable[..., t.Any]")
+V = t.TypeVar("V")
+
+def _complete_visible_commands(
+    ctx: Context, incomplete: str
+) -> cabc.Iterator[tuple[str, Command]]:
+    """List all the subcommands of a group that start with the
+    incomplete value and aren't hidden.
+
+    :param ctx: Invocation context for the group.
+    :param incomplete: Value being completed. May be empty.
+    """
+    multi = t.cast(Group, ctx.command)
+
+    for name in multi.list_commands(ctx):
+        if name.startswith(incomplete):
+            command = multi.get_command(ctx, name)
+
+            if command is not None and not command.hidden:
+                yield name, command
+
+def _check_nested_chain(
+    base_command: Group, cmd_name: str, cmd: Command, register: bool = False
+) -> None:
+    if not base_command.chain or not isinstance(cmd, Group):
+        return
+
+    if register:
+        message = (
+            f"It is not possible to add the group {cmd_name!r} to another"
+            f" group {base_command.name!r} that is in chain mode."
+        )
+    else:
+        message = (
+            f"Found the group {cmd_name!r} as subcommand to another group "
+            f" {base_command.name!r} that is in chain mode. This is not supported."
+        )
+
+    raise RuntimeError(message)
+
+def batch(iterable: cabc.Iterable[V], batch_size: int) -> list[tuple[V, ...]]:
+    return list(zip(*repeat(iter(iterable), batch_size), strict=False))
+
+@contextmanager
+def augment_usage_errors(
+    ctx: Context, param: Parameter | None = None
+) -> cabc.Iterator[None]:
+    """Context manager that attaches extra information to exceptions."""
+    try:
+        yield
+    except BadParameter as e:
+        if e.ctx is None:
+            e.ctx = ctx
+        if param is not None and e.param is None:
+            e.param = param
+        raise
+    except UsageError as e:
+        if e.ctx is None:
+            e.ctx = ctx
+        raise
+
+def iter_params_for_processing(
+    invocation_order: cabc.Sequence[Parameter],
+    declaration_order: cabc.Sequence[Parameter],
+) -> list[Parameter]:
+    """Returns all declared parameters in the order they should be processed.
+
+    The declared parameters are re-shuffled depending on the order in which
+    they were invoked, as well as the eagerness of each parameters.
+
+    The invocation order takes precedence over the declaration order. I.e. the
+    order in which the user provided them to the CLI is respected.
+
+    This behavior and its effect on callback evaluation is detailed at:
+    https://click.palletsprojects.com/en/stable/advanced/#callback-evaluation-order
+    """
+
+    def sort_key(item: Parameter) -> tuple[bool, float]:
+        try:
+            idx: float = invocation_order.index(item)
+        except ValueError:
+            idx = float("inf")
+
+        return not item.is_eager, idx
+
+    return sorted(declaration_order, key=sort_key)
+
+class ParameterSource(enum.Enum):
+    """This is an :class:`~enum.Enum` that indicates the source of a
+    parameter's value.
+
+    Use :meth:`click.Context.get_parameter_source` to get the
+    source for a parameter by name.
+
+    .. versionchanged:: 8.0
+        Use :class:`~enum.Enum` and drop the ``validate`` method.
+
+    .. versionchanged:: 8.0
+        Added the ``PROMPT`` value.
+    """
+
+    COMMANDLINE = enum.auto()
+    """The value was provided by the command line args."""
+    ENVIRONMENT = enum.auto()
+    """The value was provided with an environment variable."""
+    DEFAULT = enum.auto()
+    """Used the default specified by the parameter."""
+    DEFAULT_MAP = enum.auto()
+    """Used a default provided by :attr:`Context.default_map`."""
+    PROMPT = enum.auto()
+    """Used a prompt to confirm a default or provide a value."""
+
+class Context:
+    """The context is a special internal object that holds state relevant
+    for the script execution at every single level.  It's normally invisible
+    to commands unless they opt-in to getting access to it.
+
+    The context is useful as it can pass internal objects around and can
+    control special execution features such as reading data from
+    environment variables.
+
+    A context can be used as context manager in which case it will call
+    :meth:`close` on teardown.
+
+    :param command: the command class for this context.
+    :param parent: the parent context.
+    :param info_name: the info name for this invocation.  Generally this
+                      is the most descriptive name for the script or
+                      command.  For the toplevel script it is usually
+                      the name of the script, for commands below it it's
+                      the name of the script.
+    :param obj: an arbitrary object of user data.
+    :param auto_envvar_prefix: the prefix to use for automatic environment
+                               variables.  If this is `None` then reading
+                               from environment variables is disabled.  This
+                               does not affect manually set environment
+                               variables which are always read.
+    :param default_map: a dictionary (like object) with default values
+                        for parameters.
+    :param terminal_width: the width of the terminal.  The default is
+                           inherit from parent context.  If no context
+                           defines the terminal width then auto
+                           detection will be applied.
+    :param max_content_width: the maximum width for content rendered by
+                              Click (this currently only affects help
+                              pages).  This defaults to 80 characters if
+                              not overridden.  In other words: even if the
+                              terminal is larger than that, Click will not
+                              format things wider than 80 characters by
+                              default.  In addition to that, formatters might
+                              add some safety mapping on the right.

@@ -1,0 +1,200 @@
+import inspect
+import os
+import platform
+import shutil
+import subprocess
+import sys
+import traceback
+from collections.abc import Callable, Sequence
+from datetime import datetime
+from enum import Enum
+from functools import update_wrapper
+from pathlib import Path
+from traceback import FrameSummary, StackSummary
+from types import TracebackType
+from typing import Annotated, Any
+from uuid import UUID
+
+import click
+from annotated_doc import Doc
+from typer._types import TyperChoice
+
+from ._typing import get_args, get_origin, is_literal_type, is_union, literal_values
+from .completion import get_completion_inspect_parameters
+from .core import (
+    DEFAULT_MARKUP_MODE,
+    HAS_RICH,
+    MarkupMode,
+    TyperArgument,
+    TyperCommand,
+    TyperGroup,
+    TyperOption,
+)
+from .models import (
+    AnyType,
+    ArgumentInfo,
+    CommandFunctionType,
+    CommandInfo,
+    Default,
+    DefaultPlaceholder,
+    DeveloperExceptionConfig,
+    FileBinaryRead,
+    FileBinaryWrite,
+    FileText,
+    FileTextWrite,
+    NoneType,
+    OptionInfo,
+    ParameterInfo,
+    ParamMeta,
+    Required,
+    TyperInfo,
+    TyperPath,
+)
+from .utils import get_params_from_function
+
+_original_except_hook = sys.excepthook
+_typer_developer_exception_attr_name = "__typer_developer_exception__"
+
+def except_hook(
+    exc_type: type[BaseException], exc_value: BaseException, tb: TracebackType | None
+) -> None:
+    exception_config: DeveloperExceptionConfig | None = getattr(
+        exc_value, _typer_developer_exception_attr_name, None
+    )
+    standard_traceback = os.getenv(
+        "TYPER_STANDARD_TRACEBACK", os.getenv("_TYPER_STANDARD_TRACEBACK")
+    )
+    if (
+        standard_traceback
+        or not exception_config
+        or not exception_config.pretty_exceptions_enable
+    ):
+        _original_except_hook(exc_type, exc_value, tb)
+        return
+    typer_path = os.path.dirname(__file__)
+    click_path = os.path.dirname(click.__file__)
+    internal_dir_names = [typer_path, click_path]
+    exc = exc_value
+    if HAS_RICH:
+        from . import rich_utils
+
+        rich_tb = rich_utils.get_traceback(exc, exception_config, internal_dir_names)
+        console_stderr = rich_utils._get_rich_console(stderr=True)
+        console_stderr.print(rich_tb)
+        return
+    tb_exc = traceback.TracebackException.from_exception(exc)
+    stack: list[FrameSummary] = []
+    for frame in tb_exc.stack:
+        if any(frame.filename.startswith(path) for path in internal_dir_names):
+            if not exception_config.pretty_exceptions_short:
+                # Hide the line for internal libraries, Typer and Click
+                stack.append(
+                    traceback.FrameSummary(
+                        filename=frame.filename,
+                        lineno=frame.lineno,
+                        name=frame.name,
+                        line="",
+                    )
+                )
+        else:
+            stack.append(frame)
+    # Type ignore ref: https://github.com/python/typeshed/pull/8244
+    final_stack_summary = StackSummary.from_list(stack)
+    tb_exc.stack = final_stack_summary
+    for line in tb_exc.format():
+        print(line, file=sys.stderr)
+    return
+
+def get_install_completion_arguments() -> tuple[click.Parameter, click.Parameter]:
+    install_param, show_param = get_completion_inspect_parameters()
+    click_install_param, _ = get_click_param(install_param)
+    click_show_param, _ = get_click_param(show_param)
+    return click_install_param, click_show_param
+
+class Typer:
+    """
+    `Typer` main class, the main entrypoint to use Typer.
+
+    Read more in the
+    [Typer docs for First Steps](https://typer.tiangolo.com/tutorial/typer-app/).
+
+    ## Example
+
+    ```python
+    import typer
+
+    app = typer.Typer()
+    ```
+    """
+
+    def __init__(
+        self,
+        *,
+        name: Annotated[
+            str | None,
+            Doc(
+                """
+                The name of this application.
+                Mostly used to set the name for [subcommands](https://typer.tiangolo.com/tutorial/subcommands/), in which case it can be overridden by `add_typer(name=...)`.
+
+                **Example**
+
+                ```python
+                import typer
+
+                app = typer.Typer(name="users")
+                ```
+                """
+            ),
+        ] = Default(None),
+        cls: Annotated[
+            type[TyperGroup] | None,
+            Doc(
+                """
+                The class of this app. Mainly used when [using the Click library underneath](https://typer.tiangolo.com/tutorial/using-click/). Can usually be left at the default value `None`.
+                Otherwise, should be a subtype of `TyperGroup`.
+
+                **Example**
+
+                ```python
+                import typer
+
+                app = typer.Typer(cls=TyperGroup)
+                ```
+                """
+            ),
+        ] = Default(None),
+        invoke_without_command: Annotated[
+            bool,
+            Doc(
+                """
+                By setting this to `True`, you can make sure a callback is executed even when no subcommand is provided.
+
+                **Example**
+
+                ```python
+                import typer
+
+                app = typer.Typer(invoke_without_command=True)
+                ```
+                """
+            ),
+        ] = Default(False),
+        no_args_is_help: Annotated[
+            bool,
+            Doc(
+                """
+                If this is set to `True`, running a command without any arguments will automatically show the help page.
+
+                **Example**
+
+                ```python
+                import typer
+
+                app = typer.Typer(no_args_is_help=True)
+                ```
+                """
+            ),
+        ] = Default(False),
+        subcommand_metavar: Annotated[
+            str | None,

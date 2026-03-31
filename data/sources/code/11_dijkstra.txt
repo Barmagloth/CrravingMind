@@ -1,0 +1,200 @@
+# Title: Dijkstra's Algorithm for finding single source shortest path from scratch
+# Author: Shubham Malik
+# References: https://en.wikipedia.org/wiki/Dijkstra%27s_algorithm
+
+import math
+import sys
+
+# For storing the vertex set to retrieve node with the lowest distance
+
+class PriorityQueue:
+    # Based on Min Heap
+    def __init__(self):
+        """
+        Priority queue class constructor method.
+
+        Examples:
+        >>> priority_queue_test = PriorityQueue()
+        >>> priority_queue_test.cur_size
+        0
+        >>> priority_queue_test.array
+        []
+        >>> priority_queue_test.pos
+        {}
+        """
+        self.cur_size = 0
+        self.array = []
+        self.pos = {}  # To store the pos of node in array
+
+    def is_empty(self):
+        """
+        Conditional boolean method to determine if the priority queue is empty or not.
+
+        Examples:
+        >>> priority_queue_test = PriorityQueue()
+        >>> priority_queue_test.is_empty()
+        True
+        >>> priority_queue_test.insert((2, 'A'))
+        >>> priority_queue_test.is_empty()
+        False
+        """
+        return self.cur_size == 0
+
+    def min_heapify(self, idx):
+        """
+        Sorts the queue array so that the minimum element is root.
+
+        Examples:
+        >>> priority_queue_test = PriorityQueue()
+        >>> priority_queue_test.cur_size = 3
+        >>> priority_queue_test.pos = {'A': 0, 'B': 1, 'C': 2}
+
+        >>> priority_queue_test.array = [(5, 'A'), (10, 'B'), (15, 'C')]
+        >>> priority_queue_test.min_heapify(0)
+        >>> priority_queue_test.array
+        [(5, 'A'), (10, 'B'), (15, 'C')]
+
+        >>> priority_queue_test.array = [(10, 'A'), (5, 'B'), (15, 'C')]
+        >>> priority_queue_test.min_heapify(0)
+        >>> priority_queue_test.array
+        [(5, 'B'), (10, 'A'), (15, 'C')]
+
+        >>> priority_queue_test.array = [(10, 'A'), (15, 'B'), (5, 'C')]
+        >>> priority_queue_test.min_heapify(0)
+        >>> priority_queue_test.array
+        [(5, 'C'), (15, 'B'), (10, 'A')]
+
+        >>> priority_queue_test.array = [(10, 'A'), (5, 'B')]
+        >>> priority_queue_test.cur_size = len(priority_queue_test.array)
+        >>> priority_queue_test.pos = {'A': 0, 'B': 1}
+        >>> priority_queue_test.min_heapify(0)
+        >>> priority_queue_test.array
+        [(5, 'B'), (10, 'A')]
+        """
+        lc = self.left(idx)
+        rc = self.right(idx)
+        if lc < self.cur_size and self.array[lc][0] < self.array[idx][0]:
+            smallest = lc
+        else:
+            smallest = idx
+        if rc < self.cur_size and self.array[rc][0] < self.array[smallest][0]:
+            smallest = rc
+        if smallest != idx:
+            self.swap(idx, smallest)
+            self.min_heapify(smallest)
+
+    def insert(self, tup):
+        """
+        Inserts a node into the Priority Queue.
+
+        Examples:
+        >>> priority_queue_test = PriorityQueue()
+        >>> priority_queue_test.insert((10, 'A'))
+        >>> priority_queue_test.array
+        [(10, 'A')]
+        >>> priority_queue_test.insert((15, 'B'))
+        >>> priority_queue_test.array
+        [(10, 'A'), (15, 'B')]
+        >>> priority_queue_test.insert((5, 'C'))
+        >>> priority_queue_test.array
+        [(5, 'C'), (10, 'A'), (15, 'B')]
+        """
+        self.pos[tup[1]] = self.cur_size
+        self.cur_size += 1
+        self.array.append((sys.maxsize, tup[1]))
+        self.decrease_key((sys.maxsize, tup[1]), tup[0])
+
+    def extract_min(self):
+        """
+        Removes and returns the min element at top of priority queue.
+
+        Examples:
+        >>> priority_queue_test = PriorityQueue()
+        >>> priority_queue_test.array = [(10, 'A'), (15, 'B')]
+        >>> priority_queue_test.cur_size = len(priority_queue_test.array)
+        >>> priority_queue_test.pos = {'A': 0, 'B': 1}
+        >>> priority_queue_test.insert((5, 'C'))
+        >>> priority_queue_test.extract_min()
+        'C'
+        >>> priority_queue_test.array[0]
+        (10, 'A')
+        """
+        min_node = self.array[0][1]
+        self.array[0] = self.array[self.cur_size - 1]
+        self.cur_size -= 1
+        self.min_heapify(0)
+        del self.pos[min_node]
+        return min_node
+
+    def left(self, i):
+        """
+        Returns the index of left child
+
+        Examples:
+        >>> priority_queue_test = PriorityQueue()
+        >>> priority_queue_test.left(0)
+        1
+        >>> priority_queue_test.left(1)
+        3
+        """
+        return 2 * i + 1
+
+    def right(self, i):
+        """
+        Returns the index of right child
+
+        Examples:
+        >>> priority_queue_test = PriorityQueue()
+        >>> priority_queue_test.right(0)
+        2
+        >>> priority_queue_test.right(1)
+        4
+        """
+        return 2 * i + 2
+
+    def par(self, i):
+        """
+        Returns the index of parent
+
+        Examples:
+        >>> priority_queue_test = PriorityQueue()
+        >>> priority_queue_test.par(1)
+        0
+        >>> priority_queue_test.par(2)
+        1
+        >>> priority_queue_test.par(4)
+        2
+        """
+        return math.floor(i / 2)
+
+    def swap(self, i, j):
+        """
+        Swaps array elements at indices i and j, update the pos{}
+
+        Examples:
+        >>> priority_queue_test = PriorityQueue()
+        >>> priority_queue_test.array = [(10, 'A'), (15, 'B')]
+        >>> priority_queue_test.cur_size = len(priority_queue_test.array)
+        >>> priority_queue_test.pos = {'A': 0, 'B': 1}
+        >>> priority_queue_test.swap(0, 1)
+        >>> priority_queue_test.array
+        [(15, 'B'), (10, 'A')]
+        >>> priority_queue_test.pos
+        {'A': 1, 'B': 0}
+        """
+        self.pos[self.array[i][1]] = j
+        self.pos[self.array[j][1]] = i
+        temp = self.array[i]
+        self.array[i] = self.array[j]
+        self.array[j] = temp
+
+    def decrease_key(self, tup, new_d):
+        """
+        Decrease the key value for a given tuple, assuming the new_d is at most old_d.
+
+        Examples:
+        >>> priority_queue_test = PriorityQueue()
+        >>> priority_queue_test.array = [(10, 'A'), (15, 'B')]
+        >>> priority_queue_test.cur_size = len(priority_queue_test.array)
+        >>> priority_queue_test.pos = {'A': 0, 'B': 1}
+        >>> priority_queue_test.decrease_key((10, 'A'), 5)

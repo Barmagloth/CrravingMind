@@ -1,0 +1,200 @@
+// Copyright IBM Corp. 2014, 2026
+// SPDX-License-Identifier: BUSL-1.1
+
+package command
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/hashicorp/terraform/internal/backend/backendrun"
+	"github.com/hashicorp/terraform/internal/command/arguments"
+	"github.com/hashicorp/terraform/internal/command/views"
+	"github.com/hashicorp/terraform/internal/plans/planfile"
+	"github.com/hashicorp/terraform/internal/tfdiags"
+)
+
+// ApplyCommand is a Command implementation that applies a Terraform
+// configuration and actually builds or changes infrastructure.
+type ApplyCommand struct {
+	Meta
+
+	// If true, then this apply command will become the "destroy"
+	// command. It is just like apply but only processes a destroy.
+	Destroy bool
+}
+
+func (c *ApplyCommand) Run(rawArgs []string) int {
+	var diags tfdiags.Diagnostics
+
+	// Parse and apply global view arguments
+	common, rawArgs := arguments.ParseView(rawArgs)
+	c.View.Configure(common)
+
+	// Propagate -no-color for legacy use of Ui.  The remote backend and
+	// cloud package use this; it should be removed when/if they are
+	// migrated to views.
+	c.Meta.color = !common.NoColor
+	c.Meta.Color = c.Meta.color
+
+	// Parse and validate flags
+	var args *arguments.Apply
+	switch {
+	case c.Destroy:
+		args, diags = arguments.ParseApplyDestroy(rawArgs)
+	default:
+		args, diags = arguments.ParseApply(rawArgs)
+	}
+
+	// Instantiate the view, even if there are flag errors, so that we render
+	// diagnostics according to the desired view
+	view := views.NewApply(args.ViewType, c.Destroy, c.View)
+
+	if diags.HasErrors() {
+		view.Diagnostics(diags)
+		view.HelpPrompt()
+		return 1
+	}
+
+	// Check for user-supplied plugin path
+	var err error
+	if c.pluginPath, err = c.loadPluginPath(); err != nil {
+		diags = diags.Append(err)
+		view.Diagnostics(diags)
+		return 1
+	}
+
+	// Attempt to load the plan file, if specified
+	planFile, loadPlanFileDiags := c.LoadPlanFile(args.PlanPath)
+	diags = diags.Append(loadPlanFileDiags)
+	if diags.HasErrors() {
+		view.Diagnostics(diags)
+		return 1
+	}
+
+	// FIXME: the -input flag value is needed to initialize the backend and the
+	// operation, but there is no clear path to pass this value down, so we
+	// continue to mutate the Meta object state for now.
+	c.Meta.input = args.InputEnabled
+
+	// FIXME: the -parallelism flag is used to control the concurrency of
+	// Terraform operations. At the moment, this value is used both to
+	// initialize the backend via the ContextOpts field inside CLIOpts, and to
+	// set a largely unused field on the Operation request. Again, there is no
+	// clear path to pass this value down, so we continue to mutate the Meta
+	// object state for now.
+	c.Meta.parallelism = args.Operation.Parallelism
+
+	// Prepare the backend, passing the plan file if present, and the
+	// backend-specific arguments
+	be, beDiags := c.PrepareBackend(planFile, args.State, args.ViewType)
+	diags = diags.Append(beDiags)
+	if diags.HasErrors() {
+		view.Diagnostics(diags)
+		return 1
+	}
+
+	// Build the operation request
+	opReq, opDiags := c.OperationRequest(be, view, args.ViewType, planFile, args.Operation, args.AutoApprove)
+	diags = diags.Append(opDiags)
+	if diags.HasErrors() {
+		view.Diagnostics(diags)
+		return 1
+	}
+
+	// Collect variable value and add them to the operation request
+	var varDiags tfdiags.Diagnostics
+	opReq.Variables, varDiags = args.Vars.CollectValues(func(filename string, src []byte) {
+		opReq.ConfigLoader.Parser().ForceFileSource(filename, src)
+	})
+	diags = diags.Append(varDiags)
+
+	// Before we delegate to the backend, we'll print any warning diagnostics
+	// we've accumulated here, since the backend will start fresh with its own
+	// diagnostics.
+	view.Diagnostics(diags)
+	if diags.HasErrors() {
+		return 1
+	}
+	diags = nil
+
+	// Run the operation
+	op, err := c.RunOperation(be, opReq)
+	if err != nil {
+		diags = diags.Append(err)
+		view.Diagnostics(diags)
+		return 1
+	}
+
+	if op.Result != backendrun.OperationSuccess {
+		return op.Result.ExitStatus()
+	}
+
+	// Render the resource count and outputs, unless those counts are being
+	// rendered already in a remote Terraform process.
+	if rb, isRemoteBackend := be.(BackendWithRemoteTerraformVersion); !isRemoteBackend || rb.IsLocalOperations() {
+		view.ResourceCount(args.State.StateOutPath)
+		if !c.Destroy && op.State != nil {
+			view.Outputs(op.State.RootOutputValues)
+		}
+	}
+
+	view.Diagnostics(diags)
+
+	if diags.HasErrors() {
+		return 1
+	}
+
+	return 0
+}
+
+func (c *ApplyCommand) LoadPlanFile(path string) (*planfile.WrappedPlanFile, tfdiags.Diagnostics) {
+	var planFile *planfile.WrappedPlanFile
+	var diags tfdiags.Diagnostics
+
+	// Try to load plan if path is specified
+	if path != "" {
+		var err error
+		planFile, err = c.PlanFile(path)
+		if err != nil {
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				fmt.Sprintf("Failed to load %q as a plan file", path),
+				fmt.Sprintf("Error: %s", err),
+			))
+			return nil, diags
+		}
+
+		// If the path doesn't look like a plan, both planFile and err will be
+		// nil. In that case, the user is probably trying to use the positional
+		// argument to specify a configuration path. Point them at -chdir.
+		if planFile == nil {
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				fmt.Sprintf("Failed to load %q as a plan file", path),
+				"The specified path is a directory, not a plan file. You can use the global -chdir flag to use this directory as the configuration root.",
+			))
+			return nil, diags
+		}
+
+		// If we successfully loaded a plan but this is a destroy operation,
+		// explain that this is not supported.
+		if c.Destroy {
+			diags = diags.Append(tfdiags.Sourceless(
+				tfdiags.Error,
+				"Destroy can't be called with a plan file",
+				fmt.Sprintf("If this plan was created using plan -destroy, apply it using:\n  terraform apply %q", path),
+			))
+			return nil, diags
+		}
+	}
+
+	return planFile, diags
+}
+
+func (c *ApplyCommand) PrepareBackend(planFile *planfile.WrappedPlanFile, args *arguments.State, viewType arguments.ViewType) (backendrun.OperationsBackend, tfdiags.Diagnostics) {
+	var diags tfdiags.Diagnostics
+
+	// FIXME: we need to apply the state arguments to the meta object here
+	// because they are later used when initializing the backend. Carving a
+	// path to pass these arguments to the functions that need them is

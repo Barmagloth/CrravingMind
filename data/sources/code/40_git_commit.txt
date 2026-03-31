@@ -1,0 +1,200 @@
+/*
+ * Builtin "git commit"
+ *
+ * Copyright (c) 2007 Kristian Høgsberg <krh@redhat.com>
+ * Based on git-commit.sh by Junio C Hamano and Linus Torvalds
+ */
+
+#define USE_THE_REPOSITORY_VARIABLE
+#define DISABLE_SIGN_COMPARE_WARNINGS
+
+#include "builtin.h"
+#include "advice.h"
+#include "config.h"
+#include "lockfile.h"
+#include "cache-tree.h"
+#include "color.h"
+#include "dir.h"
+#include "editor.h"
+#include "environment.h"
+#include "diff.h"
+#include "commit.h"
+#include "add-interactive.h"
+#include "gettext.h"
+#include "revision.h"
+#include "wt-status.h"
+#include "run-command.h"
+#include "strbuf.h"
+#include "object-name.h"
+#include "parse-options.h"
+#include "path.h"
+#include "preload-index.h"
+#include "read-cache.h"
+#include "repository.h"
+#include "string-list.h"
+#include "rerere.h"
+#include "unpack-trees.h"
+#include "column.h"
+#include "sequencer.h"
+#include "sparse-index.h"
+#include "mailmap.h"
+#include "help.h"
+#include "commit-reach.h"
+#include "commit-graph.h"
+#include "pretty.h"
+#include "trailer.h"
+
+static const char * const builtin_commit_usage[] = {
+	N_("git commit [-a | --interactive | --patch] [-s] [-v] [-u[<mode>]] [--amend]\n"
+	   "           [--dry-run] [(-c | -C | --squash) <commit> | --fixup [(amend|reword):]<commit>]\n"
+	   "           [-F <file> | -m <msg>] [--reset-author] [--allow-empty]\n"
+	   "           [--allow-empty-message] [--no-verify] [-e] [--author=<author>]\n"
+	   "           [--date=<date>] [--cleanup=<mode>] [--[no-]status]\n"
+	   "           [-i | -o] [--pathspec-from-file=<file> [--pathspec-file-nul]]\n"
+	   "           [(--trailer <token>[(=|:)<value>])...] [-S[<keyid>]]\n"
+	   "           [--] [<pathspec>...]"),
+	NULL
+};
+
+static const char * const builtin_status_usage[] = {
+	N_("git status [<options>] [--] [<pathspec>...]"),
+	NULL
+};
+
+static const char empty_amend_advice[] =
+N_("You asked to amend the most recent commit, but doing so would make\n"
+"it empty. You can repeat your command with --allow-empty, or you can\n"
+"remove the commit entirely with \"git reset HEAD^\".\n");
+
+static const char empty_cherry_pick_advice[] =
+N_("The previous cherry-pick is now empty, possibly due to conflict resolution.\n"
+"If you wish to commit it anyway, use:\n"
+"\n"
+"    git commit --allow-empty\n"
+"\n");
+
+static const char empty_rebase_pick_advice[] =
+N_("Otherwise, please use 'git rebase --skip'\n");
+
+static const char empty_cherry_pick_advice_single[] =
+N_("Otherwise, please use 'git cherry-pick --skip'\n");
+
+static const char empty_cherry_pick_advice_multi[] =
+N_("and then use:\n"
+"\n"
+"    git cherry-pick --continue\n"
+"\n"
+"to resume cherry-picking the remaining commits.\n"
+"If you wish to skip this commit, use:\n"
+"\n"
+"    git cherry-pick --skip\n"
+"\n");
+
+static const char *color_status_slots[] = {
+	[WT_STATUS_HEADER]	  = "header",
+	[WT_STATUS_UPDATED]	  = "updated",
+	[WT_STATUS_CHANGED]	  = "changed",
+	[WT_STATUS_UNTRACKED]	  = "untracked",
+	[WT_STATUS_NOBRANCH]	  = "noBranch",
+	[WT_STATUS_UNMERGED]	  = "unmerged",
+	[WT_STATUS_LOCAL_BRANCH]  = "localBranch",
+	[WT_STATUS_REMOTE_BRANCH] = "remoteBranch",
+	[WT_STATUS_ONBRANCH]	  = "branch",
+};
+
+static const char *use_message_buffer;
+static struct lock_file index_lock; /* real index */
+static struct lock_file false_lock; /* used only for partial commits */
+static enum {
+	COMMIT_AS_IS = 1,
+	COMMIT_NORMAL,
+	COMMIT_PARTIAL
+} commit_style;
+
+static const char *force_author;
+static char *logfile;
+static char *template_file;
+/*
+ * The _message variables are commit names from which to take
+ * the commit message and/or authorship.
+ */
+static const char *author_message, *author_message_buffer;
+static const char *edit_message, *use_message;
+static char *fixup_message, *fixup_commit, *squash_message;
+static const char *fixup_prefix;
+static int all, also, interactive, patch_interactive, only, amend, signoff;
+static struct interactive_options interactive_opts = INTERACTIVE_OPTIONS_INIT;
+static int edit_flag = -1; /* unspecified */
+static int quiet, verbose, no_verify, allow_empty, dry_run, renew_authorship;
+static int config_commit_verbose = -1; /* unspecified */
+static int no_post_rewrite, allow_empty_message, pathspec_file_nul;
+static const char *untracked_files_arg, *force_date, *ignore_submodule_arg, *ignored_arg;
+static const char *sign_commit, *pathspec_from_file;
+static struct strvec trailer_args = STRVEC_INIT;
+
+/*
+ * The default commit message cleanup mode will remove the lines
+ * beginning with # (shell comments) and leading and trailing
+ * whitespaces (empty lines or containing only whitespaces)
+ * if editor is used, and only the whitespaces if the message
+ * is specified explicitly.
+ */
+static enum commit_msg_cleanup_mode cleanup_mode;
+static char *cleanup_config;
+
+static enum commit_whence whence;
+static int use_editor = 1, include_status = 1;
+static int have_option_m;
+static struct strbuf message = STRBUF_INIT;
+
+static enum wt_status_format status_format = STATUS_FORMAT_UNSPECIFIED;
+
+static int opt_parse_porcelain(const struct option *opt, const char *arg, int unset)
+{
+	enum wt_status_format *value = (enum wt_status_format *)opt->value;
+	if (unset)
+		*value = STATUS_FORMAT_NONE;
+	else if (!arg)
+		*value = STATUS_FORMAT_PORCELAIN;
+	else if (!strcmp(arg, "v1") || !strcmp(arg, "1"))
+		*value = STATUS_FORMAT_PORCELAIN;
+	else if (!strcmp(arg, "v2") || !strcmp(arg, "2"))
+		*value = STATUS_FORMAT_PORCELAIN_V2;
+	else
+		die("unsupported porcelain version '%s'", arg);
+
+	return 0;
+}
+
+static int opt_parse_m(const struct option *opt, const char *arg, int unset)
+{
+	struct strbuf *buf = opt->value;
+	if (unset) {
+		have_option_m = 0;
+		strbuf_setlen(buf, 0);
+	} else {
+		have_option_m = 1;
+		if (buf->len)
+			strbuf_addch(buf, '\n');
+		strbuf_addstr(buf, arg);
+		strbuf_complete_line(buf);
+	}
+	return 0;
+}
+
+static int opt_parse_rename_score(const struct option *opt, const char *arg, int unset)
+{
+	const char **value = opt->value;
+
+	BUG_ON_OPT_NEG(unset);
+
+	if (arg != NULL && *arg == '=')
+		arg = arg + 1;
+
+	*value = arg;
+	return 0;
+}
+
+static void determine_whence(struct wt_status *s)
+{
+	if (file_exists(git_path_merge_head(the_repository)))

@@ -1,0 +1,171 @@
+..................... 7
+
+  2.1  Elements of the Internetwork System ........................... 7
+  2.2  Model of Operation ............................................ 7
+  2.3  The Host Environment .......................................... 8
+  2.4  Interfaces .................................................... 9
+  2.5  Relation to Other Protocols ................................... 9
+  2.6  Reliable Communication ........................................ 9
+  2.7  Connection Establishment and Clearing ........................ 10
+  2.8  Data Communication ........................................... 12
+  2.9  Precedence and Security ...................................... 13
+  2.10 Robustness Principle ......................................... 13
+
+3.  FUNCTIONAL SPECIFICATION ........................................ 15
+
+  3.1  Header Format ................................................ 15
+  3.2  Terminology .................................................. 19
+  3.3  Sequence Numbers ............................................. 24
+  3.4  Establishing a connection .................................... 30
+  3.5  Closing a Connection ......................................... 37
+  3.6  Precedence and Security ...................................... 40
+  3.7  Data Communication ........................................... 40
+  3.8  Interfaces ................................................... 44
+  3.9  Event Processing ............................................. 52
+
+GLOSSARY ............................................................ 79
+
+REFERENCES .......................................................... 85
+
+                                                                [Page i]
+
+
+                                                          September 1981
+Transmission Control Protocol
+
+[Page ii]                                                               
+
+
+September 1981                                                          
+                                           Transmission Control Protocol
+
+                                PREFACE
+
+This document describes the DoD Standard Transmission Control Protocol
+(TCP).  There have been nine earlier editions of the ARPA TCP
+specification on which this standard is based, and the present text
+draws heavily from them.  There have been many contributors to this work
+both in terms of concepts and in terms of text.  This edition clarifies
+several details and removes the end-of-letter buffer-size adjustments,
+and redescribes the letter mechanism as a push function.
+
+                                                           Jon Postel
+
+                                                           Editor
+
+                                                              [Page iii]
+
+
+
+RFC:  793
+Replaces: RFC 761
+IENs:  129, 124, 112, 81,
+55, 44, 40, 27, 21, 5
+
+                     TRANSMISSION CONTROL PROTOCOL
+
+                         DARPA INTERNET PROGRAM
+                         PROTOCOL SPECIFICATION
+
+                            1.  INTRODUCTION
+
+The Transmission Control Protocol (TCP) is intended for use as a highly
+reliable host-to-host protocol between hosts in packet-switched computer
+communication networks, and in interconnected systems of such networks.
+
+This document describes the functions to be performed by the
+Transmission Control Protocol, the program that implements it, and its
+interface to programs or users that require its services.
+
+1.1.  Motivation
+
+  Computer communication systems are playing an increasingly important
+  role in military, government, and civilian environments.  This
+  document focuses its attention primarily on military computer
+  communication requirements, especially robustness in the presence of
+  communication unreliability and availability in the presence of
+  congestion, but many of these problems are found in the civilian and
+  government sector as well.
+
+  As strategic and tactical computer communication networks are
+  developed and deployed, it is essential to provide means of
+  interconnecting them and to provide standard interprocess
+  communication protocols which can support a broad range of
+  applications.  In anticipation of the need for such standards, the
+  Deputy Undersecretary of Defense for Research and Engineering has
+  declared the Transmission Control Protocol (TCP) described herein to
+  be a basis for DoD-wide inter-process communication protocol
+  standardization.
+
+  TCP is a connection-oriented, end-to-end reliable protocol designed to
+  fit into a layered hierarchy of protocols which support multi-network
+  applications.  The TCP provides for reliable inter-process
+  communication between pairs of processes in host computers attached to
+  distinct but interconnected computer communication networks.  Very few
+  assumptions are made as to the reliability of the communication
+  protocols below the TCP layer.  TCP assumes it can obtain a simple,
+  potentially unreliable datagram service from the lower level
+  protocols.  In principle, the TCP should be able to operate above a
+  wide spectrum of communication systems ranging from hard-wired
+  connections to packet-switched or circuit-switched networks.
+
+                                                                [Page 1]
+
+
+                                                          September 1981
+Transmission Control Protocol
+Introduction
+
+  TCP is based on concepts first described by Cerf and Kahn in [1].  The
+  TCP fits into a layered protocol architecture just above a basic
+  Internet Protocol [2] which provides a way for the TCP to send and
+  receive variable-length segments of information enclosed in internet
+  datagram "envelopes".  The internet datagram provides a means for
+  addressing source and destination TCPs in different networks.  The
+  internet protocol also deals with any fragmentation or reassembly of
+  the TCP segments required to achieve transport and delivery through
+  multiple networks and interconnecting gateways.  The internet protocol
+  also carries information on the precedence, security classification
+  and compartmentation of the TCP segments, so this information can be
+  communicated end-to-end across multiple networks.
+
+                           Protocol Layering
+
+                        +---------------------+
+                        |     higher-level    |
+                        +---------------------+
+                        |        TCP          |
+                        +---------------------+
+                        |  internet protocol  |
+                        +---------------------+
+                        |communication network|
+                        +---------------------+
+
+                                Figure 1
+
+  Much of this document is written in the context of TCP implementations
+  which are co-resident with higher level protocols in the host
+  computer.  Some computer systems will be connected to networks via
+  front-end computers which house the TCP and internet protocol layers,
+  as well as network specific software.  The TCP specification describes
+  an interface to the higher level protocols which appears to be
+  implementable even for the front-end case, as long as a suitable
+  host-to-front end protocol is implemented.
+
+1.2.  Scope
+
+  The TCP is intended to provide a reliable process-to-process
+  communication service in a multinetwork environment.  The TCP is
+  intended to be a host-to-host protocol in common use in multiple
+  networks.
+
+1.3.  About this Document
+
+  This document represents a specification of the behavior required of
+  any TCP implementation, both in its interactions with higher level
+  protocols and in its interactions with other TCPs.  The rest of this
+
+[Page 2]                                                                
+
+
+September 1981

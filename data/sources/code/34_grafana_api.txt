@@ -1,0 +1,200 @@
+// Package api Grafana HTTP API.
+//
+// The Grafana backend exposes an HTTP API, the same API is used by the frontend to do
+// everything from saving dashboards, creating users and updating data sources.
+//
+//	Schemes: http, https
+//	BasePath: /api
+//	Version: 0.0.1
+//	Contact: Grafana Labs<hello@grafana.com> https://grafana.com
+//
+//	Consumes:
+//	- application/json
+//
+//	Produces:
+//	- application/json
+//
+//	Security:
+//	- basic:
+//	- api_key:
+//
+//	SecurityDefinitions:
+//	basic:
+//	 type: basic
+//	api_key:
+//	 type: apiKey
+//	 name: Authorization
+//	 in: header
+//
+// swagger:meta
+package api
+
+import (
+	"errors"
+	"net/http"
+
+	"go.opentelemetry.io/otel"
+
+	"github.com/grafana/grafana/pkg/api/routing"
+	"github.com/grafana/grafana/pkg/middleware"
+	"github.com/grafana/grafana/pkg/middleware/requestmeta"
+	"github.com/grafana/grafana/pkg/registry/apis/secret"
+	ac "github.com/grafana/grafana/pkg/services/accesscontrol"
+	"github.com/grafana/grafana/pkg/services/accesscontrol/ssoutils"
+	"github.com/grafana/grafana/pkg/services/auth"
+	"github.com/grafana/grafana/pkg/services/cloudmigration"
+	contextmodel "github.com/grafana/grafana/pkg/services/contexthandler/model"
+	"github.com/grafana/grafana/pkg/services/correlations"
+	"github.com/grafana/grafana/pkg/services/dashboards"
+	"github.com/grafana/grafana/pkg/services/datasources"
+	"github.com/grafana/grafana/pkg/services/featuremgmt"
+	"github.com/grafana/grafana/pkg/services/org"
+	"github.com/grafana/grafana/pkg/services/pluginsintegration/pluginaccesscontrol"
+	publicdashboardsapi "github.com/grafana/grafana/pkg/services/publicdashboards/api"
+	"github.com/grafana/grafana/pkg/services/serviceaccounts"
+	"github.com/grafana/grafana/pkg/services/user"
+	"github.com/grafana/grafana/pkg/web"
+)
+
+var tracer = otel.Tracer("github.com/grafana/grafana/pkg/api")
+
+// registerRoutes registers all API HTTP routes.
+func (hs *HTTPServer) registerRoutes() {
+	reqNoAuth := middleware.NoAuth()
+	reqSignedIn := middleware.ReqSignedIn
+	reqNotSignedIn := middleware.ReqNotSignedIn
+	reqSignedInNoAnonymous := middleware.ReqSignedInNoAnonymous
+	reqGrafanaAdmin := middleware.ReqGrafanaAdmin
+	reqOrgAdmin := middleware.ReqOrgAdmin
+	reqRoleForAppRoute := middleware.RoleAppPluginAuth(hs.AccessControl, hs.pluginStore, hs.log)
+	reqSnapshotPublicModeOrCreate := middleware.SnapshotPublicModeOrCreate(hs.Cfg, hs.AccessControl)
+	reqSnapshotPublicModeOrDelete := middleware.SnapshotPublicModeOrDelete(hs.Cfg, hs.AccessControl)
+	redirectFromLegacyPanelEditURL := middleware.RedirectFromLegacyPanelEditURL(hs.Cfg)
+	authorize := ac.Middleware(hs.AccessControl)
+	authorizeInOrg := ac.AuthorizeInOrgMiddleware(hs.AccessControl, hs.authnService)
+	quota := middleware.Quota(hs.QuotaService)
+	userUIDResolver := middlewareUserUIDResolver(hs.userService, ":id")
+
+	r := hs.RouteRegister
+
+	// not logged in views
+	r.Get("/logout", hs.Logout)
+	r.Post("/login", requestmeta.SetOwner(requestmeta.TeamAuth), quota(string(auth.QuotaTargetSrv)), routing.Wrap(hs.LoginPost))
+	r.Get("/login/:name", quota(string(auth.QuotaTargetSrv)), hs.OAuthLogin)
+
+	r.Get("/login", hs.LoginView)
+	r.Get("/invite/:code", hs.Index)
+
+	// Temporary MT-frontend config endpoint
+	r.Get("/bootdata", reqNoAuth, hs.GetBootdata)
+
+	// authed views
+	r.Get("/", reqSignedIn, hs.Index)
+	r.Get("/profile/", reqSignedInNoAnonymous, hs.Index)
+	r.Get("/profile/password", reqSignedInNoAnonymous, hs.Index)
+	r.Get("/.well-known/change-password", redirectToChangePassword)
+	r.Get("/profile/switch-org/:id", reqSignedInNoAnonymous, hs.ChangeActiveOrgAndRedirectToHome)
+	r.Get("/org/", authorize(ac.OrgPreferencesAccessEvaluator), hs.Index)
+	r.Get("/org/new", authorizeInOrg(ac.UseGlobalOrg, ac.OrgsCreateAccessEvaluator), hs.Index)
+	r.Get("/datasources/", authorize(datasources.ConfigurationPageAccess), hs.Index)
+	r.Get("/datasources/new", authorize(datasources.NewPageAccess), hs.Index)
+	r.Get("/datasources/edit/*", authorize(datasources.EditPageAccess), hs.Index)
+	r.Get("/datasources/correlations", authorize(correlations.ConfigurationPageAccess), hs.Index)
+	r.Get("/org/users", authorize(ac.EvalPermission(ac.ActionOrgUsersRead)), hs.Index)
+	r.Get("/org/users/new", reqOrgAdmin, hs.Index)
+	r.Get("/org/users/invite", authorize(ac.EvalPermission(ac.ActionOrgUsersAdd)), hs.Index)
+	r.Get("/org/teams", authorize(ac.TeamsAccessEvaluator), hs.Index)
+	r.Get("/org/teams/edit/*", authorize(ac.TeamsEditAccessEvaluator), hs.Index)
+	r.Get("/org/teams/new", authorize(ac.EvalPermission(ac.ActionTeamsCreate)), hs.Index)
+	r.Get("/org/serviceaccounts", authorize(ac.EvalPermission(serviceaccounts.ActionRead)), hs.Index)
+	r.Get("/org/serviceaccounts/:serviceAccountId", authorize(ac.EvalPermission(serviceaccounts.ActionRead)), hs.Index)
+	r.Get("/dashboard/import/", reqSignedIn, hs.Index)
+	r.Get("/configuration", reqGrafanaAdmin, hs.Index)
+	r.Get("/admin", reqOrgAdmin, hs.Index)
+	r.Get("/admin/settings", authorize(ac.EvalPermission(ac.ActionSettingsRead, ac.ScopeSettingsAll)), hs.Index)
+	r.Get("/admin/users", authorize(ac.EvalAny(ac.EvalPermission(ac.ActionOrgUsersRead), ac.EvalPermission(ac.ActionUsersRead, ac.ScopeGlobalUsersAll))), hs.Index)
+	r.Get("/admin/users/create", authorize(ac.EvalPermission(ac.ActionUsersCreate)), hs.Index)
+	r.Get("/admin/users/edit/:id", authorize(ac.EvalPermission(ac.ActionUsersRead)), hs.Index)
+	r.Get("/admin/orgs", authorizeInOrg(ac.UseGlobalOrg, ac.OrgsAccessEvaluator), hs.Index)
+	r.Get("/admin/orgs/edit/:id", authorizeInOrg(ac.UseGlobalOrg, ac.OrgsAccessEvaluator), hs.Index)
+	r.Get("/admin/stats", authorize(ac.EvalPermission(ac.ActionServerStatsRead)), hs.Index)
+	r.Get("/admin/provisioning", reqOrgAdmin, hs.Index)
+	r.Get("/admin/provisioning/*", middleware.ProvisioningAuth(reqOrgAdmin), hs.Index)
+
+	if hs.Cfg.CloudMigration.Enabled {
+		r.Get("/admin/migrate-to-cloud", authorize(cloudmigration.MigrationAssistantAccess), hs.Index)
+	}
+
+	// secrets management page
+	//nolint:staticcheck // not yet migrated to OpenFeature
+	if hs.Features.IsEnabledGlobally(featuremgmt.FlagSecretsManagementAppPlatformUI) {
+		r.Get("/admin/secrets", authorize(ac.EvalAny(
+			ac.EvalPermission(secret.ActionSecretSecureValuesCreate),
+			ac.EvalPermission(secret.ActionSecretSecureValuesRead),
+			ac.EvalPermission(secret.ActionSecretKeepersCreate),
+			ac.EvalPermission(secret.ActionSecretKeepersRead),
+		)), hs.Index)
+		r.Get("/admin/secrets/secure-values", authorize(ac.EvalAny(
+			ac.EvalPermission(secret.ActionSecretSecureValuesCreate),
+			ac.EvalPermission(secret.ActionSecretSecureValuesRead),
+		)), hs.Index)
+		r.Get("/admin/secrets/keepers", authorize(ac.EvalAny(
+			ac.EvalPermission(secret.ActionSecretKeepersCreate),
+			ac.EvalPermission(secret.ActionSecretKeepersRead),
+		)), hs.Index)
+		r.Get("/admin/secrets/keepers/*", authorize(ac.EvalAny(
+			ac.EvalPermission(secret.ActionSecretKeepersCreate),
+			ac.EvalPermission(secret.ActionSecretKeepersRead),
+		)), hs.Index)
+	}
+
+	r.Get("/styleguide", reqSignedIn, hs.Index)
+
+	r.Get("/live", reqGrafanaAdmin, hs.Index)
+	r.Get("/live/pipeline", reqGrafanaAdmin, hs.Index)
+	r.Get("/live/cloud", reqGrafanaAdmin, hs.Index)
+
+	r.Get("/plugins", middleware.CanAdminPlugins(hs.Cfg, hs.AccessControl), hs.Index)
+	r.Get("/plugins/:id/", middleware.CanAdminPlugins(hs.Cfg, hs.AccessControl), hs.Index)
+	r.Get("/plugins/:id/edit", middleware.CanAdminPlugins(hs.Cfg, hs.AccessControl), hs.Index) // deprecated
+	r.Get("/plugins/:id/page/:page", middleware.CanAdminPlugins(hs.Cfg, hs.AccessControl), hs.Index)
+
+	r.Get("/connections/datasources", authorize(datasources.ConfigurationPageAccess), hs.Index)
+	r.Get("/connections/datasources/new", authorize(datasources.NewPageAccess), hs.Index)
+	r.Get("/connections/datasources/edit/*", authorize(datasources.EditPageAccess), hs.Index)
+	r.Get("/connections", authorize(datasources.ConfigurationPageAccess), hs.Index)
+	r.Get("/connections/add-new-connection", authorize(datasources.ConfigurationPageAccess), hs.Index)
+	// Plugin details pages
+	r.Get("/connections/datasources/:id", middleware.CanAdminPlugins(hs.Cfg, hs.AccessControl), hs.Index)
+	r.Get("/connections/datasources/:id/page/:page", middleware.CanAdminPlugins(hs.Cfg, hs.AccessControl), hs.Index)
+
+	// App Root Page
+	appPluginIDScope := pluginaccesscontrol.ScopeProvider.GetResourceScope(ac.Parameter(":id"))
+	r.Get("/a/:id/*", authorize(ac.EvalPermission(pluginaccesscontrol.ActionAppAccess, appPluginIDScope)), reqSignedIn, reqRoleForAppRoute, hs.Index)
+	r.Get("/a/:id", authorize(ac.EvalPermission(pluginaccesscontrol.ActionAppAccess, appPluginIDScope)), reqSignedIn, reqRoleForAppRoute, hs.Index)
+
+	r.Get("/d/:uid/:slug", reqSignedIn, redirectFromLegacyPanelEditURL, hs.Index)
+	r.Get("/d/:uid", reqSignedIn, redirectFromLegacyPanelEditURL, hs.Index)
+	r.Get("/dashboard/script/*", reqSignedIn, hs.Index)
+	r.Get("/dashboard/new", reqSignedIn, hs.Index)
+	if featuremgmt.AnyEnabled(hs.Features, featuremgmt.FlagDashboardLibrary, featuremgmt.FlagSuggestedDashboards, featuremgmt.FlagDashboardTemplates) {
+		r.Get("/dashboard/template", reqSignedIn, hs.Index)
+	}
+	r.Get("/dashboard-solo/snapshot/*", hs.Index)
+	r.Get("/dashboard/provisioning/*", reqSignedIn, hs.Index)
+	r.Get("/d-solo/:uid/:slug", reqSignedIn, hs.Index)
+	r.Get("/d-solo/:uid", reqSignedIn, hs.Index)
+	r.Get("/dashboard-solo/script/*", reqSignedIn, hs.Index)
+	r.Get("/import/dashboard", reqSignedIn, hs.Index)
+	r.Get("/dashboards/", reqSignedIn, hs.Index)
+	r.Get("/dashboards/*", reqSignedIn, hs.Index)
+
+	if hs.Cfg.PublicDashboardsEnabled {
+		// list public dashboards
+		r.Get("/public-dashboards/list", reqSignedIn, hs.Index)
+
+		// anonymous view public dashboard
+		r.Get("/public-dashboards/:accessToken",
+			hs.PublicDashboardsApi.Middleware.HandleView,
+			publicdashboardsapi.SetPublicDashboardAccessToken,
+			publicdashboardsapi.SetPublicDashboardOrgIdOnContext(hs.PublicDashboardsApi.PublicDashboardService),

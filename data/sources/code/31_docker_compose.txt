@@ -1,0 +1,200 @@
+/*
+   Copyright 2020 Docker Compose CLI authors
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+       http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
+package compose
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"os"
+	"os/signal"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
+
+	"github.com/compose-spec/compose-go/v2/cli"
+	"github.com/compose-spec/compose-go/v2/dotenv"
+	"github.com/compose-spec/compose-go/v2/loader"
+	composepaths "github.com/compose-spec/compose-go/v2/paths"
+	"github.com/compose-spec/compose-go/v2/types"
+	composegoutils "github.com/compose-spec/compose-go/v2/utils"
+	dockercli "github.com/docker/cli/cli"
+	"github.com/docker/cli/cli-plugins/metadata"
+	"github.com/docker/cli/cli/command"
+	"github.com/docker/cli/pkg/kvfile"
+	"github.com/morikuni/aec"
+	"github.com/sirupsen/logrus"
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
+
+	"github.com/docker/compose/v5/cmd/display"
+	"github.com/docker/compose/v5/cmd/formatter"
+	"github.com/docker/compose/v5/internal/tracing"
+	"github.com/docker/compose/v5/pkg/api"
+	"github.com/docker/compose/v5/pkg/compose"
+	"github.com/docker/compose/v5/pkg/remote"
+	"github.com/docker/compose/v5/pkg/utils"
+)
+
+const (
+	// ComposeParallelLimit set the limit running concurrent operation on docker engine
+	ComposeParallelLimit = "COMPOSE_PARALLEL_LIMIT"
+	// ComposeProjectName define the project name to be used, instead of guessing from parent directory
+	ComposeProjectName = "COMPOSE_PROJECT_NAME"
+	// ComposeCompatibility try to mimic compose v1 as much as possible
+	ComposeCompatibility = api.ComposeCompatibility
+	// ComposeRemoveOrphans remove "orphaned" containers, i.e. containers tagged for current project but not declared as service
+	ComposeRemoveOrphans = "COMPOSE_REMOVE_ORPHANS"
+	// ComposeIgnoreOrphans ignore "orphaned" containers
+	ComposeIgnoreOrphans = "COMPOSE_IGNORE_ORPHANS"
+	// ComposeEnvFiles defines the env files to use if --env-file isn't used
+	ComposeEnvFiles = "COMPOSE_ENV_FILES"
+	// ComposeMenu defines if the navigation menu should be rendered. Can be also set via --menu
+	ComposeMenu = "COMPOSE_MENU"
+	// ComposeProgress defines type of progress output, if --progress isn't used
+	ComposeProgress = "COMPOSE_PROGRESS"
+)
+
+// rawEnv load a dot env file using docker/cli key=value parser, without attempt to interpolate or evaluate values
+func rawEnv(r io.Reader, filename string, vars map[string]string, lookup func(key string) (string, bool)) error {
+	lines, err := kvfile.ParseFromReader(r, lookup)
+	if err != nil {
+		return fmt.Errorf("failed to parse env_file %s: %w", filename, err)
+	}
+	for _, line := range lines {
+		key, value, _ := strings.Cut(line, "=")
+		vars[key] = value
+	}
+	return nil
+}
+
+var stdioToStdout bool
+
+func init() {
+	// compose evaluates env file values for interpolation
+	// `raw` format allows to load env_file with the same parser used by docker run --env-file
+	dotenv.RegisterFormat("raw", rawEnv)
+
+	if v, ok := os.LookupEnv("COMPOSE_STATUS_STDOUT"); ok {
+		stdioToStdout, _ = strconv.ParseBool(v)
+	}
+}
+
+// Command defines a compose CLI command as a func with args
+type Command func(context.Context, []string) error
+
+// CobraCommand defines a cobra command function
+type CobraCommand func(context.Context, *cobra.Command, []string) error
+
+// AdaptCmd adapt a CobraCommand func to cobra library
+func AdaptCmd(fn CobraCommand) func(cmd *cobra.Command, args []string) error {
+	return func(cmd *cobra.Command, args []string) error {
+		ctx, cancel := context.WithCancel(cmd.Context())
+
+		s := make(chan os.Signal, 1)
+		signal.Notify(s, syscall.SIGTERM, syscall.SIGINT)
+		go func() {
+			<-s
+			cancel()
+			signal.Stop(s)
+			close(s)
+		}()
+
+		err := fn(ctx, cmd, args)
+		if api.IsErrCanceled(err) || errors.Is(ctx.Err(), context.Canceled) {
+			err = dockercli.StatusError{
+				StatusCode: 130,
+			}
+		}
+		if display.Mode == display.ModeJSON {
+			err = makeJSONError(err)
+		}
+		return err
+	}
+}
+
+// Adapt a Command func to cobra library
+func Adapt(fn Command) func(cmd *cobra.Command, args []string) error {
+	return AdaptCmd(func(ctx context.Context, cmd *cobra.Command, args []string) error {
+		return fn(ctx, args)
+	})
+}
+
+type ProjectOptions struct {
+	ProjectName        string
+	Profiles           []string
+	ConfigPaths        []string
+	WorkDir            string
+	ProjectDir         string
+	EnvFiles           []string
+	Compatibility      bool
+	Progress           string
+	Offline            bool
+	All                bool
+	insecureRegistries []string
+}
+
+// ProjectFunc does stuff within a types.Project
+type ProjectFunc func(ctx context.Context, project *types.Project) error
+
+// ProjectServicesFunc does stuff within a types.Project and a selection of services
+type ProjectServicesFunc func(ctx context.Context, project *types.Project, services []string) error
+
+// WithProject creates a cobra run command from a ProjectFunc based on configured project options and selected services
+func (o *ProjectOptions) WithProject(fn ProjectFunc, dockerCli command.Cli) func(cmd *cobra.Command, args []string) error {
+	return o.WithServices(dockerCli, func(ctx context.Context, project *types.Project, services []string) error {
+		return fn(ctx, project)
+	})
+}
+
+// WithServices creates a cobra run command from a ProjectFunc based on configured project options and selected services
+func (o *ProjectOptions) WithServices(dockerCli command.Cli, fn ProjectServicesFunc) func(cmd *cobra.Command, args []string) error {
+	return Adapt(func(ctx context.Context, services []string) error {
+		backend, err := compose.NewComposeService(dockerCli)
+		if err != nil {
+			return err
+		}
+
+		project, metrics, err := o.ToProject(ctx, dockerCli, backend, services, cli.WithoutEnvironmentResolution)
+		if err != nil {
+			return err
+		}
+
+		ctx = context.WithValue(ctx, tracing.MetricsKey{}, metrics)
+
+		project, err = project.WithServicesEnvironmentResolved(true)
+		if err != nil {
+			return err
+		}
+
+		return fn(ctx, project, services)
+	})
+}
+
+type jsonErrorData struct {
+	Error   bool   `json:"error,omitempty"`
+	Message string `json:"message,omitempty"`
+}
+
+func errorAsJSON(message string) string {
+	errorMessage := &jsonErrorData{
+		Error:   true,
+		Message: message,
+	}

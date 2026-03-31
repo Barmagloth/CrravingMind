@@ -1,0 +1,200 @@
+from __future__ import annotations
+
+import builtins
+import ipaddress
+import uuid
+import weakref
+from collections.abc import Callable, Mapping, Sequence, Set
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from decimal import Decimal
+from enum import Enum
+from pathlib import Path
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    ClassVar,
+    Literal,
+    TypeAlias,
+    TypeVar,
+    Union,
+    cast,
+    get_origin,
+    overload,
+)
+
+from pydantic import BaseModel, EmailStr
+from pydantic.fields import FieldInfo as PydanticFieldInfo
+from sqlalchemy import (
+    Boolean,
+    Column,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    Interval,
+    Numeric,
+    inspect,
+)
+from sqlalchemy import Enum as sa_Enum
+from sqlalchemy.orm import (
+    Mapped,
+    RelationshipProperty,
+    declared_attr,
+    registry,
+    relationship,
+)
+from sqlalchemy.orm.attributes import set_attribute
+from sqlalchemy.orm.decl_api import DeclarativeMeta
+from sqlalchemy.orm.instrumentation import is_instrumented
+from sqlalchemy.sql.schema import MetaData
+from sqlalchemy.sql.sqltypes import LargeBinary, Time, Uuid
+from typing_extensions import deprecated
+
+from ._compat import (  # type: ignore[attr-defined]
+    PYDANTIC_MINOR_VERSION,
+    BaseConfig,
+    ModelMetaclass,
+    Representation,
+    SQLModelConfig,
+    Undefined,
+    UndefinedType,
+    finish_init,
+    get_annotations,
+    get_field_metadata,
+    get_model_fields,
+    get_relationship_to,
+    get_sa_type_from_field,
+    init_pydantic_private_attrs,
+    is_field_noneable,
+    is_table_model_class,
+    sqlmodel_init,
+    sqlmodel_validate,
+)
+from .sql.sqltypes import AutoString
+
+if TYPE_CHECKING:
+    from pydantic._internal._model_construction import ModelMetaclass as ModelMetaclass
+    from pydantic._internal._repr import Representation as Representation
+    from pydantic_core import PydanticUndefined as Undefined
+    from pydantic_core import PydanticUndefinedType as UndefinedType
+
+_T = TypeVar("_T")
+NoArgAnyCallable = Callable[[], Any]
+IncEx: TypeAlias = (
+    set[int]
+    | set[str]
+    | Mapping[int, Union["IncEx", bool]]
+    | Mapping[str, Union["IncEx", bool]]
+)
+OnDeleteType = Literal["CASCADE", "SET NULL", "RESTRICT"]
+
+def __dataclass_transform__(
+    *,
+    eq_default: bool = True,
+    order_default: bool = False,
+    kw_only_default: bool = False,
+    field_descriptors: tuple[type | Callable[..., Any], ...] = (()),
+) -> Callable[[_T], _T]:
+    return lambda a: a
+
+class FieldInfo(PydanticFieldInfo):  # type: ignore[misc]
+    # mypy - ignore that PydanticFieldInfo is @final
+    def __init__(self, default: Any = Undefined, **kwargs: Any) -> None:
+        primary_key = kwargs.pop("primary_key", False)
+        nullable = kwargs.pop("nullable", Undefined)
+        foreign_key = kwargs.pop("foreign_key", Undefined)
+        ondelete = kwargs.pop("ondelete", Undefined)
+        unique = kwargs.pop("unique", False)
+        index = kwargs.pop("index", Undefined)
+        sa_type = kwargs.pop("sa_type", Undefined)
+        sa_column = kwargs.pop("sa_column", Undefined)
+        sa_column_args = kwargs.pop("sa_column_args", Undefined)
+        sa_column_kwargs = kwargs.pop("sa_column_kwargs", Undefined)
+        if sa_column is not Undefined:
+            if sa_column_args is not Undefined:
+                raise RuntimeError(
+                    "Passing sa_column_args is not supported when "
+                    "also passing a sa_column"
+                )
+            if sa_column_kwargs is not Undefined:
+                raise RuntimeError(
+                    "Passing sa_column_kwargs is not supported when "
+                    "also passing a sa_column"
+                )
+            if primary_key is not Undefined:
+                raise RuntimeError(
+                    "Passing primary_key is not supported when also passing a sa_column"
+                )
+            if nullable is not Undefined:
+                raise RuntimeError(
+                    "Passing nullable is not supported when also passing a sa_column"
+                )
+            if foreign_key is not Undefined:
+                raise RuntimeError(
+                    "Passing foreign_key is not supported when also passing a sa_column"
+                )
+            if ondelete is not Undefined:
+                raise RuntimeError(
+                    "Passing ondelete is not supported when also passing a sa_column"
+                )
+            if unique is not Undefined:
+                raise RuntimeError(
+                    "Passing unique is not supported when also passing a sa_column"
+                )
+            if index is not Undefined:
+                raise RuntimeError(
+                    "Passing index is not supported when also passing a sa_column"
+                )
+            if sa_type is not Undefined:
+                raise RuntimeError(
+                    "Passing sa_type is not supported when also passing a sa_column"
+                )
+        if ondelete is not Undefined:
+            if foreign_key is Undefined:
+                raise RuntimeError("ondelete can only be used with foreign_key")
+        super().__init__(default=default, **kwargs)
+        self.primary_key = primary_key
+        self.nullable = nullable
+        self.foreign_key = foreign_key
+        self.ondelete = ondelete
+        self.unique = unique
+        self.index = index
+        self.sa_type = sa_type
+        self.sa_column = sa_column
+        self.sa_column_args = sa_column_args
+        self.sa_column_kwargs = sa_column_kwargs
+
+class RelationshipInfo(Representation):
+    def __init__(
+        self,
+        *,
+        back_populates: str | None = None,
+        cascade_delete: bool | None = False,
+        passive_deletes: bool | Literal["all"] | None = False,
+        link_model: Any | None = None,
+        sa_relationship: RelationshipProperty | None = None,  # type: ignore
+        sa_relationship_args: Sequence[Any] | None = None,
+        sa_relationship_kwargs: Mapping[str, Any] | None = None,
+    ) -> None:
+        if sa_relationship is not None:
+            if sa_relationship_args is not None:
+                raise RuntimeError(
+                    "Passing sa_relationship_args is not supported when "
+                    "also passing a sa_relationship"
+                )
+            if sa_relationship_kwargs is not None:
+                raise RuntimeError(
+                    "Passing sa_relationship_kwargs is not supported when "
+                    "also passing a sa_relationship"
+                )
+        self.back_populates = back_populates
+        self.cascade_delete = cascade_delete
+        self.passive_deletes = passive_deletes
+        self.link_model = link_model
+        self.sa_relationship = sa_relationship
+        self.sa_relationship_args = sa_relationship_args
+        self.sa_relationship_kwargs = sa_relationship_kwargs
+
+@dataclass

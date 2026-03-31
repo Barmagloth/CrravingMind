@@ -1,0 +1,136 @@
+3.2. RR definitions                                            11
+          3.2.1. Format                                              11
+          3.2.2. TYPE values                                         12
+          3.2.3. QTYPE values                                        12
+          3.2.4. CLASS values                                        13
+
+Mockapetris                                                     [Page 1]
+
+RFC 1035        Domain Implementation and Specification    November 1987
+
+          3.2.5. QCLASS values                                       13
+      3.3. Standard RRs                                              13
+          3.3.1. CNAME RDATA format                                  14
+          3.3.2. HINFO RDATA format                                  14
+          3.3.3. MB RDATA format (EXPERIMENTAL)                      14
+          3.3.4. MD RDATA format (Obsolete)                          15
+          3.3.5. MF RDATA format (Obsolete)                          15
+          3.3.6. MG RDATA format (EXPERIMENTAL)                      16
+          3.3.7. MINFO RDATA format (EXPERIMENTAL)                   16
+          3.3.8. MR RDATA format (EXPERIMENTAL)                      17
+          3.3.9. MX RDATA format                                     17
+          3.3.10. NULL RDATA format (EXPERIMENTAL)                   17
+          3.3.11. NS RDATA format                                    18
+          3.3.12. PTR RDATA format                                   18
+          3.3.13. SOA RDATA format                                   19
+          3.3.14. TXT RDATA format                                   20
+      3.4. ARPA Internet specific RRs                                20
+          3.4.1. A RDATA format                                      20
+          3.4.2. WKS RDATA format                                    21
+      3.5. IN-ADDR.ARPA domain                                       22
+      3.6. Defining new types, classes, and special namespaces       24
+  4. MESSAGES                                                        25
+      4.1. Format                                                    25
+          4.1.1. Header section format                               26
+          4.1.2. Question section format                             28
+          4.1.3. Resource record format                              29
+          4.1.4. Message compression                                 30
+      4.2. Transport                                                 32
+          4.2.1. UDP usage                                           32
+          4.2.2. TCP usage                                           32
+  5. MASTER FILES                                                    33
+      5.1. Format                                                    33
+      5.2. Use of master files to define zones                       35
+      5.3. Master file example                                       36
+  6. NAME SERVER IMPLEMENTATION                                      37
+      6.1. Architecture                                              37
+          6.1.1. Control                                             37
+          6.1.2. Database                                            37
+          6.1.3. Time                                                39
+      6.2. Standard query processing                                 39
+      6.3. Zone refresh and reload processing                        39
+      6.4. Inverse queries (Optional)                                40
+          6.4.1. The contents of inverse queries and responses       40
+          6.4.2. Inverse query and response example                  41
+          6.4.3. Inverse query processing                            42
+
+Mockapetris                                                     [Page 2]
+
+RFC 1035        Domain Implementation and Specification    November 1987
+
+      6.5. Completion queries and responses                          42
+  7. RESOLVER IMPLEMENTATION                                         43
+      7.1. Transforming a user request into a query                  43
+      7.2. Sending the queries                                       44
+      7.3. Processing responses                                      46
+      7.4. Using the cache                                           47
+  8. MAIL SUPPORT                                                    47
+      8.1. Mail exchange binding                                     48
+      8.2. Mailbox binding (Experimental)                            48
+  9. REFERENCES and BIBLIOGRAPHY                                     50
+  Index                                                              54
+
+2. INTRODUCTION
+
+2.1. Overview
+
+The goal of domain names is to provide a mechanism for naming resources
+in such a way that the names are usable in different hosts, networks,
+protocol families, internets, and administrative organizations.
+
+From the user's point of view, domain names are useful as arguments to a
+local agent, called a resolver, which retrieves information associated
+with the domain name.  Thus a user might ask for the host address or
+mail information associated with a particular domain name.  To enable
+the user to request a particular type of information, an appropriate
+query type is passed to the resolver with the domain name.  To the user,
+the domain tree is a single information space; the resolver is
+responsible for hiding the distribution of data among name servers from
+the user.
+
+From the resolver's point of view, the database that makes up the domain
+space is distributed among various name servers.  Different parts of the
+domain space are stored in different name servers, although a particular
+data item will be stored redundantly in two or more name servers.  The
+resolver starts with knowledge of at least one name server.  When the
+resolver processes a user query it asks a known name server for the
+information; in return, the resolver either receives the desired
+information or a referral to another name server.  Using these
+referrals, resolvers learn the identities and contents of other name
+servers.  Resolvers are responsible for dealing with the distribution of
+the domain space and dealing with the effects of name server failure by
+consulting redundant databases in other servers.
+
+Name servers manage two kinds of data.  The first kind of data held in
+sets called zones; each zone is the complete database for a particular
+"pruned" subtree of the domain space.  This data is called
+authoritative.  A name server periodically checks to make sure that its
+zones are up to date, and if not, obtains a new copy of updated zones
+
+Mockapetris                                                     [Page 3]
+
+RFC 1035        Domain Implementation and Specification    November 1987
+
+from master files stored locally or in another name server.  The second
+kind of data is cached data which was acquired by a local resolver.
+This data may be incomplete, but improves the performance of the
+retrieval process when non-local data is repeatedly accessed.  Cached
+data is eventually discarded by a timeout mechanism.
+
+This functional structure isolates the problems of user interface,
+failure recovery, and distribution in the resolvers and isolates the
+database update and refresh problems in the name servers.
+
+2.2. Common configurations
+
+A host can participate in the domain name system in a number of ways,
+depending on whether the host runs programs that retrieve information
+from the domain system, name servers that answer queries from other
+hosts, or various combinations of both functions.  The simplest, and
+perhaps most typical, configuration is shown below:
+
+                 Local Host                        |  Foreign
+                                                   |
+    +---------+               +----------+         |  +--------+
+    |         | user queries  |          |queries  |  |        |
+    |  User   |-------------->|          |---------

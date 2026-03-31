@@ -1,0 +1,200 @@
+/*
+ * Copyright (c) 2009-Present, Redis Ltd.
+ * All rights reserved.
+ *
+ * Copyright (c) 2024-present, Valkey contributors.
+ * All rights reserved.
+ *
+ * Licensed under your choice of (a) the Redis Source Available License 2.0
+ * (RSALv2); or (b) the Server Side Public License v1 (SSPLv1); or (c) the
+ * GNU Affero General Public License v3 (AGPLv3).
+ *
+ * Portions of this file are available under BSD3 terms; see REDISCONTRIBUTIONS for more information.
+ */
+
+#include "server.h"
+#include "monotonic.h"
+#include "cluster.h"
+#include "cluster_slot_stats.h"
+#include "slowlog.h"
+#include "bio.h"
+#include "latency.h"
+#include "atomicvar.h"
+#include "mt19937-64.h"
+#include "functions.h"
+#include "hdr_histogram.h"
+#include "syscheck.h"
+#include "threads_mngr.h"
+#include "fmtargs.h"
+#include "mstr.h"
+#include "ebuckets.h"
+#include "cluster_asm.h"
+#include "fwtree.h"
+#include "estore.h"
+#include "chk.h"
+
+#include <time.h>
+#include <signal.h>
+#include <sys/wait.h>
+#include <errno.h>
+#include <ctype.h>
+#include <stdarg.h>
+#include <arpa/inet.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <sys/file.h>
+#include <sys/time.h>
+#include <sys/resource.h>
+#include <sys/uio.h>
+#include <sys/un.h>
+#include <limits.h>
+#include <float.h>
+#include <math.h>
+#include <sys/utsname.h>
+#include <locale.h>
+#include <sys/socket.h>
+
+#ifdef __linux__
+#include <sys/mman.h>
+#endif
+
+#if defined(HAVE_SYSCTL_KIPC_SOMAXCONN) || defined(HAVE_SYSCTL_KERN_SOMAXCONN)
+#include <sys/sysctl.h>
+#endif
+
+#ifdef __GNUC__
+#define GNUC_VERSION_STR STRINGIFY(__GNUC__) "." STRINGIFY(__GNUC_MINOR__) "." STRINGIFY(__GNUC_PATCHLEVEL__)
+#else
+#define GNUC_VERSION_STR "0.0.0"
+#endif
+
+/* Our shared "common" objects */
+
+struct sharedObjectsStruct shared;
+
+/* Global vars that are actually used as constants. The following double
+ * values are used for double on-disk serialization, and are initialized
+ * at runtime to avoid strange compiler optimizations. */
+
+double R_Zero, R_PosInf, R_NegInf, R_Nan;
+
+/*================================= Globals ================================= */
+
+/* Global vars */
+struct redisServer server; /* Server global state */
+
+/* Snapshot of server.stat_total_client_process_input_buff_events used in
+ * beforeSleep() to detect event loop cycles where client input buffers
+ * were processed. */
+long long stat_prev_total_client_process_input_buff_events = 0;
+
+/*============================ Internal prototypes ========================== */
+
+static inline int isShutdownInitiated(void);
+static inline int isCommandReusable(struct redisCommand *cmd, robj *commandArg);
+int isReadyToShutdown(void);
+int finishShutdown(void);
+const char *replstateToString(int replstate);
+
+/*============================ Utility functions ============================ */
+
+/* Check if a given command can be reused without performing a lookup.
+ * A command is reusable if:
+ * - It is not NULL.
+ * - It does not have subcommands (subcommands_dict == NULL).
+ *   This preserves simplicity on the check and accounts for the majority of the use cases.
+ * - Its full name matches the provided command argument. */
+static inline int isCommandReusable(struct redisCommand *cmd, robj *commandArg) {
+    return cmd != NULL &&
+           cmd->subcommands_dict == NULL &&
+           strcasecmp(cmd->fullname, commandArg->ptr) == 0;
+}
+
+/* This macro tells if we are in the context of loading an AOF. */
+#define isAOFLoadingContext() \
+    ((server.current_client && server.current_client->id == CLIENT_ID_AOF) ? 1 : 0)
+
+/* We use a private localtime implementation which is fork-safe. The logging
+ * function of Redis may be called from other threads. */
+void nolocks_localtime(struct tm *tmp, time_t t, time_t tz, int dst);
+
+static inline int shouldShutdownAsap(void) {
+    int shutdown_asap;
+    atomicGet(server.shutdown_asap, shutdown_asap);
+    return shutdown_asap;
+}
+
+/* Low level logging. To use only for very big messages, otherwise
+ * serverLog() is to prefer. */
+void serverLogRaw(int level, const char *msg) {
+    const int syslogLevelMap[] = { LOG_DEBUG, LOG_INFO, LOG_NOTICE, LOG_WARNING };
+    const char *c = ".-*#";
+    FILE *fp;
+    char buf[64];
+    int rawmode = (level & LL_RAW);
+    int log_to_stdout = server.logfile[0] == '\0';
+
+    level &= 0xff; /* clear flags */
+    if (level < server.verbosity) return;
+
+    fp = log_to_stdout ? stdout : fopen(server.logfile,"a");
+    if (!fp) return;
+
+    if (rawmode) {
+        fprintf(fp,"%s",msg);
+    } else {
+        int off;
+        struct timeval tv;
+        int role_char;
+        int daylight_active = 0;
+        pid_t pid = getpid();
+
+        gettimeofday(&tv,NULL);
+        struct tm tm;
+        atomicGet(server.daylight_active, daylight_active);
+        nolocks_localtime(&tm,tv.tv_sec,server.timezone,daylight_active);
+        off = strftime(buf,sizeof(buf),"%d %b %Y %H:%M:%S.",&tm);
+        snprintf(buf+off,sizeof(buf)-off,"%03d",(int)tv.tv_usec/1000);
+        if (server.sentinel_mode) {
+            role_char = 'X'; /* Sentinel. */
+        } else if (pid != server.pid) {
+            role_char = 'C'; /* RDB / AOF writing child. */
+        } else {
+            role_char = (server.masterhost ? 'S':'M'); /* Slave or Master. */
+        }
+        fprintf(fp,"%d:%c %s %c %s\n",
+            (int)getpid(),role_char, buf,c[level],msg);
+    }
+    fflush(fp);
+
+    if (!log_to_stdout) fclose(fp);
+    if (server.syslog_enabled) syslog(syslogLevelMap[level], "%s", msg);
+}
+
+/* Like serverLogRaw() but with printf-alike support. This is the function that
+ * is used across the code. The raw version is only used in order to dump
+ * the INFO output on crash. */
+void _serverLog(int level, const char *fmt, ...) {
+    va_list ap;
+    char msg[LOG_MAX_LEN];
+
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof(msg), fmt, ap);
+    va_end(ap);
+
+    serverLogRaw(level,msg);
+}
+
+/* Low level logging from signal handler. Should be used with pre-formatted strings. 
+   See serverLogFromHandler. */
+void serverLogRawFromHandler(int level, const char *msg) {
+    int fd;
+    int log_to_stdout = server.logfile[0] == '\0';
+    char buf[64];
+
+    if ((level&0xff) < server.verbosity || (log_to_stdout && server.daemonize))
+        return;
+    fd = log_to_stdout ? STDOUT_FILENO :
+                         open(server.logfile, O_APPEND|O_CREAT|O_WRONLY, 0644);
+    if (fd == -1) return;
+    if (level & LL_RAW) {
