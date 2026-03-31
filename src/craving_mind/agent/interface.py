@@ -212,6 +212,22 @@ class CLIProvider(LLMProvider):
         parts.append("[ASSISTANT]")
         return "\n\n".join(parts)
 
+    def _trim_conversation(self, messages: list, max_chars: int = 20000) -> list:
+        """Keep first message + recent messages so total stays within max_chars."""
+        total = sum(len(str(m.get("content", ""))) for m in messages)
+        if total <= max_chars:
+            return messages
+        trimmed = [messages[0]] if messages else []
+        remaining = max_chars - len(str(messages[0].get("content", ""))) if messages else max_chars
+        for msg in reversed(messages[1:]):
+            msg_len = len(str(msg.get("content", "")))
+            if remaining - msg_len > 0:
+                trimmed.insert(1, msg)
+                remaining -= msg_len
+            else:
+                break
+        return trimmed
+
     def _parse_response(self, raw_text: str) -> tuple[str, list]:
         """Extract (content, tool_calls) from the model's response text.
 
@@ -262,6 +278,7 @@ class CLIProvider(LLMProvider):
                 "Run: pip install claude-code-sdk"
             )
 
+        messages = self._trim_conversation(messages)
         prompt = self._build_prompt(messages, tools, system)
         logger.debug(
             "CLIProvider.chat: prompt_len=%d max_tokens=%d session_id=%s",

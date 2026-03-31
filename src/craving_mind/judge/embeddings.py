@@ -43,6 +43,10 @@ class EmbeddingModel:
                 os.path.join(_pkg_root, "..", "..", "..", "models", "sentence-transformers")
             )
             if os.path.isdir(_local_cache):
+                # Force offline mode so HuggingFace Hub doesn't attempt network
+                # access when the model is already cached locally.
+                os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+                os.environ.setdefault("HF_HUB_OFFLINE", "1")
                 self._model = SentenceTransformer(self.model_name, cache_folder=_local_cache)
             else:
                 self._model = SentenceTransformer(self.model_name)
