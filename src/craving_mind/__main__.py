@@ -230,6 +230,7 @@ def main() -> None:
         logger=logger,
         run_dir=run_dir,
         artifact_manager=artifact_manager,
+        checkpoint=checkpoint,
     )
 
     tasks_per_epoch = config.get("benchmark", {}).get("tasks_per_epoch", 10)

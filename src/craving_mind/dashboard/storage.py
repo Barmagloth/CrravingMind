@@ -73,3 +73,14 @@ class MetricsStorage:
         if not history:
             return None
         return max(history, key=lambda e: e.get("epoch", -1))
+
+    def get_live_state(self) -> dict | None:
+        """Read live_state.json written by the runner per-task."""
+        path = os.path.join(self.run_dir, "live_state.json")
+        if not os.path.exists(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, json.JSONDecodeError):
+            return None

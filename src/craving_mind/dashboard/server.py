@@ -137,10 +137,12 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* ---- Log Panel ---- */
   #log-panel {
-    grid-column: 1 / 4;
-    max-height: 200px;
+    flex: 1;
+    min-height: 180px;
+    display: flex;
+    flex-direction: column;
   }
-  .log-inner { max-height: 150px; overflow-y: auto; font-family: var(--mono); font-size: 11px; }
+  .log-inner { flex: 1; min-height: 140px; max-height: 400px; overflow-y: auto; font-family: var(--mono); font-size: 11px; }
   .log-entry { padding: 2px 6px; border-radius: 3px; margin: 1px 0; line-height: 1.5; }
   .log-entry .ts { color: var(--muted); margin-right: 8px; }
   .log-entry .ep { color: var(--info); margin-right: 8px; }
@@ -393,15 +395,15 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </div>
     </div>
 
-  </div>
-
-  <!-- LOG PANEL -->
-  <div id="log-panel" class="panel">
-    <div class="panel-title">
-      Live Event Log
-      <button onclick="clearLog()" style="background:none;border:1px solid var(--border);color:var(--muted);padding:1px 8px;border-radius:4px;cursor:pointer;font-size:10px;margin-left:8px">Clear</button>
+    <!-- LOG PANEL (right column) -->
+    <div id="log-panel" class="panel">
+      <div class="panel-title">
+        Live Event Log
+        <button onclick="clearLog()" style="background:none;border:1px solid var(--border);color:var(--muted);padding:1px 8px;border-radius:4px;cursor:pointer;font-size:10px;margin-left:8px">Clear</button>
+      </div>
+      <div class="log-inner" id="log-inner"></div>
     </div>
-    <div class="log-inner" id="log-inner"></div>
+
   </div>
 
   <!-- FILE VIEWER PANEL -->

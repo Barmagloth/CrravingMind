@@ -1,7 +1,9 @@
 """Epoch runner: drives the main training loop."""
 
+import json
 import logging
 import os
+from datetime import datetime, timezone
 
 
 class EpochRunner:
@@ -32,6 +34,7 @@ class EpochRunner:
         logger,
         run_dir: str = "runs",
         artifact_manager=None,
+        checkpoint=None,
     ):
         self.config = config
         self.agent = agent_interface
@@ -48,7 +51,9 @@ class EpochRunner:
         self.logger = logger
         self.run_dir = run_dir
         self.artifact_manager = artifact_manager
+        self.checkpoint = checkpoint
         self._prev_compress_code: str | None = None
+        self._live_state_path = os.path.join(run_dir, "live_state.json")
 
     # ------------------------------------------------------------------
     # Public API
@@ -67,6 +72,7 @@ class EpochRunner:
 
         # 1. Initialise budget with venture multiplier and R&D carry-over.
         self.budget.start_epoch(epoch, prev_success_rate, prev_saved, prev_oom)
+        self._write_live_state(epoch, tasks_completed=0, tasks_total=len(tasks))
 
         # 2. Backup memory for OOM rollback (Phase 2+).
         backup = self.memory.backup() if self.phase_manager.has_memory(epoch) else None
@@ -82,6 +88,9 @@ class EpochRunner:
                 break
             result = self._run_task(task, epoch)
             results.append(result)
+            if self.checkpoint and not result.get("skipped"):
+                self.checkpoint.save_task_log(epoch, result)
+            self._write_live_state(epoch, tasks_completed=len(results), tasks_total=len(tasks))
 
         # 5. Finalise metrics, handle OOM rollback, export artifact.
         return self._finalize_epoch(epoch, results, backup)
@@ -272,6 +281,27 @@ class EpochRunner:
             "- audit_budget(): Check your remaining token budget\n\n"
             "For each task, call run_compress with the provided text and target_ratio."
         )
+
+    # ------------------------------------------------------------------
+    # Live state
+    # ------------------------------------------------------------------
+
+    def _write_live_state(self, epoch: int, tasks_completed: int, tasks_total: int) -> None:
+        """Write live_state.json so the dashboard can show real-time budget/progress."""
+        state = {
+            "epoch": epoch,
+            "budget_remaining": self.budget.remaining,
+            "budget_initial": self.budget._initial_epoch_budget,
+            "tasks_completed": tasks_completed,
+            "tasks_total": tasks_total,
+            "is_oom": self.budget.is_oom,
+            "ts": datetime.now(tz=timezone.utc).isoformat(),
+        }
+        try:
+            with open(self._live_state_path, "w", encoding="utf-8") as f:
+                json.dump(state, f)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     # Artifact export

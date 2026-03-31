@@ -24,13 +24,14 @@ class MetricsCollector:
         epoch_history = self.storage.get_epoch_history()
         artifact_history = self.storage.get_artifact_history()
         checkpoint = self.storage.get_checkpoint()
+        live_state = self.storage.get_live_state()
 
         return {
-            "health": self._health_metrics(epoch_history, checkpoint),
+            "health": self._health_metrics(epoch_history, checkpoint, live_state),
             "efficiency": self._efficiency_metrics(epoch_history),
             "evolution": self._evolution_metrics(epoch_history, artifact_history),
             "artifact": self._artifact_metrics(artifact_history, epoch_history),
-            "live": self._live_metrics(epoch_history, checkpoint),
+            "live": self._live_metrics(epoch_history, checkpoint, live_state),
             "epoch_history": self._epoch_history_for_charts(epoch_history),
         }
 
@@ -38,7 +39,12 @@ class MetricsCollector:
     # Sub-aggregators
     # ------------------------------------------------------------------
 
-    def _health_metrics(self, epoch_history: list[dict], checkpoint: dict | None) -> dict:
+    def _health_metrics(
+        self,
+        epoch_history: list[dict],
+        checkpoint: dict | None,
+        live_state: dict | None = None,
+    ) -> dict:
         base_tokens = self.config.get("budget", {}).get("base_tokens", 50000)
         bible_max_pct = self.config.get("memory", {}).get("bible_max_weight_pct", 0.20)
 
@@ -50,10 +56,16 @@ class MetricsCollector:
             0.0 if total_tasks == 0 else (total_tasks - completed_tasks) / max(total_tasks, 1)
         )
 
-        # Budget remaining from checkpoint
-        saved_tokens = latest.get("saved_tokens", 0)
-        effective_budget = base_tokens  # rough estimate
-        budget_remaining_pct = min(1.0, saved_tokens / max(effective_budget, 1))
+        # Budget remaining: prefer live_state (per-task granularity) over epoch log
+        if live_state and live_state.get("budget_initial", 0) > 0:
+            budget_remaining = live_state["budget_remaining"]
+            budget_initial = live_state["budget_initial"]
+            saved_tokens = budget_remaining
+            budget_remaining_pct = min(1.0, budget_remaining / max(budget_initial, 1))
+        else:
+            saved_tokens = latest.get("saved_tokens", 0)
+            effective_budget = base_tokens  # rough estimate
+            budget_remaining_pct = min(1.0, saved_tokens / max(effective_budget, 1))
 
         # Bible weight — approximation from checkpoint
         bible_weight_pct = bible_max_pct  # placeholder until memory size is exposed
@@ -166,14 +178,25 @@ class MetricsCollector:
             "versions": versions,
         }
 
-    def _live_metrics(self, epoch_history: list[dict], checkpoint: dict | None) -> dict:
-        current_epoch = 0
-        if checkpoint:
+    def _live_metrics(
+        self,
+        epoch_history: list[dict],
+        checkpoint: dict | None,
+        live_state: dict | None = None,
+    ) -> dict:
+        if live_state:
+            current_epoch = live_state.get("epoch", 0)
+        elif checkpoint:
             current_epoch = checkpoint.get("epoch", 0)
         elif epoch_history:
             current_epoch = max(e.get("epoch", 0) for e in epoch_history)
+        else:
+            current_epoch = 0
 
         latest = epoch_history[-1] if epoch_history else {}
+
+        tasks_completed = live_state.get("tasks_completed", 0) if live_state else None
+        tasks_total = live_state.get("tasks_total", 0) if live_state else None
 
         return {
             "current_epoch": current_epoch,
@@ -182,6 +205,8 @@ class MetricsCollector:
             "latest_is_oom": latest.get("is_oom", False),
             "latest_drift": latest.get("drift_detected", False),
             "phase": self._current_phase(epoch_history),
+            "tasks_completed": tasks_completed,
+            "tasks_total": tasks_total,
         }
 
     def _epoch_history_for_charts(self, epoch_history: list[dict]) -> list[dict]:

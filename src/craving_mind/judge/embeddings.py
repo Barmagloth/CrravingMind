@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+import os
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -36,7 +37,15 @@ class EmbeddingModel:
         try:
             from sentence_transformers import SentenceTransformer  # type: ignore
 
-            self._model = SentenceTransformer(self.model_name)
+            # Use local cache if available (avoids re-downloading on every run)
+            _pkg_root = os.path.dirname(os.path.abspath(__file__))
+            _local_cache = os.path.normpath(
+                os.path.join(_pkg_root, "..", "..", "..", "models", "sentence-transformers")
+            )
+            if os.path.isdir(_local_cache):
+                self._model = SentenceTransformer(self.model_name, cache_folder=_local_cache)
+            else:
+                self._model = SentenceTransformer(self.model_name)
             logger.info("Loaded embedding model: %s", self.model_name)
         except ImportError:
             logger.warning(

@@ -77,6 +77,8 @@ class EntityExtractor:
         Both empty sets → 1.0 (perfect trivial match).
         One empty, one non-empty → 0.0.
         """
+        reference = set(reference) if not isinstance(reference, set) else reference
+        test = set(test) if not isinstance(test, set) else test
         if not reference and not test:
             return 1.0
         if not reference or not test:
