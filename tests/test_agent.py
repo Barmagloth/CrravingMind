@@ -199,6 +199,7 @@ class TestToolsRegistry:
         sb.run_script.return_value = SandboxResult(
             success=True, output="script ran", error=""
         )
+        sb.validate_imports.return_value = (True, "")
         return sb
 
     @pytest.fixture
@@ -226,6 +227,46 @@ class TestToolsRegistry:
     def test_execute_write_file(self, registry, memory):
         registry.execute("write_file", {"filename": "compress.py", "content": "# code"})
         assert memory.read_file("compress.py") == "# code"
+
+    def test_execute_write_file_forbidden_import_rejected(self, mock_sandbox, memory, budget):
+        mock_sandbox.validate_imports.return_value = (False, "Forbidden import: anthropic")
+        registry = ToolsRegistry(mock_sandbox, memory, budget)
+        result = registry.execute(
+            "write_file",
+            {"filename": "compress.py", "content": "from anthropic import Anthropic\n"},
+        )
+        assert result["success"] is False
+        assert "anthropic" in result["error"].lower()
+        # File must NOT have been saved
+        assert memory.read_file("compress.py") != "from anthropic import Anthropic\n"
+
+    def test_execute_write_file_smoke_test_passed(self, mock_sandbox, memory, budget):
+        mock_smoke = MagicMock()
+        mock_smoke.run.return_value = (True, [])
+        registry = ToolsRegistry(mock_sandbox, memory, budget, smoke_test=mock_smoke)
+        result = registry.execute(
+            "write_file", {"filename": "compress.py", "content": "def compress(t, r): return t"}
+        )
+        assert result["success"] is True
+        assert result.get("smoke_test") == "PASSED"
+
+    def test_execute_write_file_smoke_test_failed(self, mock_sandbox, memory, budget):
+        mock_smoke = MagicMock()
+        mock_smoke.run.return_value = (False, ["Sample 0: RuntimeError: boom"])
+        registry = ToolsRegistry(mock_sandbox, memory, budget, smoke_test=mock_smoke)
+        result = registry.execute(
+            "write_file", {"filename": "compress.py", "content": "def compress(t, r): raise RuntimeError('boom')"}
+        )
+        assert result["success"] is True  # file was saved but smoke failed
+        assert result.get("smoke_test") == "FAILED"
+        assert len(result["errors"]) > 0
+
+    def test_execute_write_non_compress_skips_validation(self, mock_sandbox, memory, budget):
+        # validate_imports should NOT be called for bible.md
+        registry = ToolsRegistry(mock_sandbox, memory, budget)
+        registry.execute("write_file", {"filename": "bible.md", "content": "some notes"})
+        mock_sandbox.validate_imports.assert_not_called()
+        assert memory.read_file("bible.md") == "some notes"
 
     def test_execute_run_compress(self, registry, mock_sandbox, memory):
         memory.write_file("compress.py", "def compress(t, r): return t")

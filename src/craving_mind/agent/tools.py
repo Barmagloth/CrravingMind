@@ -4,10 +4,11 @@
 class ToolsRegistry:
     """Registry of tools available to Crav."""
 
-    def __init__(self, sandbox, memory_manager, budget_manager):
+    def __init__(self, sandbox, memory_manager, budget_manager, smoke_test=None):
         self.sandbox = sandbox
         self.memory = memory_manager
         self.budget = budget_manager
+        self.smoke = smoke_test
 
     def get_tool_definitions(self) -> list:
         """Return Anthropic-format tool definitions."""
@@ -92,7 +93,25 @@ class ToolsRegistry:
             return {"content": content}
 
         elif tool_name == "write_file":
-            self.memory.write_file(arguments["filename"], arguments["content"])
+            filename = arguments["filename"]
+            content = arguments["content"]
+
+            if filename == "compress.py":
+                ok, err = self.sandbox.validate_imports(content)
+                if not ok:
+                    return {
+                        "success": False,
+                        "error": f"Forbidden import in compress.py: {err}. Only pure Python + whitelist allowed.",
+                    }
+
+            self.memory.write_file(filename, content)
+
+            if filename == "compress.py" and self.smoke is not None:
+                passed, errors = self.smoke.run(content)
+                if not passed:
+                    return {"success": True, "smoke_test": "FAILED", "errors": errors}
+                return {"success": True, "smoke_test": "PASSED"}
+
             return {"success": True}
 
         elif tool_name == "run_script":
