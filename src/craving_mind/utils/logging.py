@@ -74,3 +74,8 @@ def setup_logging(run_dir: str = "runs", level: str = "INFO") -> None:
     file_handler.setLevel(logging.DEBUG)  # capture everything to file
     file_handler.setFormatter(_JsonlFormatter())
     root.addHandler(file_handler)
+
+    # Suppress noisy third-party loggers that flood the console.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("sentence_transformers").setLevel(logging.WARNING)
+    logging.getLogger("huggingface_hub").setLevel(logging.WARNING)

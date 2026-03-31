@@ -81,12 +81,18 @@ class EpochRunner:
         system_prompt = self._build_system_prompt(epoch, phase)
         self.agent.start_epoch(epoch, system_prompt)
 
+        self.logger.info(
+            "[Epoch %d] Starting, budget: %d tokens",
+            epoch, self.budget.remaining,
+        )
+
         # 4. Run tasks.
         results = []
-        for task in tasks:
+        tasks_total = len(tasks)
+        for task_idx, task in enumerate(tasks):
             if self.budget.is_oom:
                 break
-            result = self._run_task(task, epoch)
+            result = self._run_task(task, epoch, task_idx=task_idx, tasks_total=tasks_total)
             results.append(result)
             if self.checkpoint and not result.get("skipped"):
                 self.checkpoint.save_task_log(epoch, result)
@@ -99,12 +105,22 @@ class EpochRunner:
     # Per-task execution
     # ------------------------------------------------------------------
 
-    def _run_task(self, task: dict, epoch: int) -> dict:
+    def _run_task(
+        self, task: dict, epoch: int, task_idx: int = 0, tasks_total: int = 0
+    ) -> dict:
         """Run a single task within an epoch."""
         source_text = task["source_text"]
         target_ratio = task["target_ratio"]
         hidden_type = task.get("hidden_type", "discourse")
         is_dynamic = task.get("is_dynamic", False)
+
+        task_id = task.get("task_id") or task.get("name") or (source_text[:20].replace("\n", " ") + "…")
+        task_label = f"{hidden_type}/{task_id}"
+
+        self.logger.info(
+            "[Epoch %d][Task %d/%d] %s  ratio=%.2f",
+            epoch, task_idx + 1, tasks_total, task_label, target_ratio,
+        )
 
         # Dedup filter (Phase 3+).
         if self.phase_manager.has_duplicate_filter(epoch):
@@ -125,7 +141,16 @@ class EpochRunner:
         turn_result = self.agent.send_task(source_text, target_ratio)
 
         if turn_result["is_oom"]:
+            self.logger.warning(
+                "[Epoch %d][Task %d/%d] OOM during task",
+                epoch, task_idx + 1, tasks_total,
+            )
             return {"oom": True, "hidden_type": hidden_type, "is_dynamic": is_dynamic}
+
+        self.logger.info(
+            "[Epoch %d][Task %d/%d] Crav responded (%d tokens)",
+            epoch, task_idx + 1, tasks_total, turn_result["tokens_spent"],
+        )
 
         # Circuit breaker: warn if a single task consumed too large a fraction.
         circuit_limit = self.budget.circuit_breaker_limit()
@@ -161,6 +186,13 @@ class EpochRunner:
         feedback = {k: v for k, v in eval_result.items() if k != "hidden_type"}
         self.agent.send_feedback(feedback)
 
+        verdict = "PASS" if eval_result["pass"] else "FAIL"
+        self.logger.info(
+            "[Epoch %d][Task %d/%d] Judge: semantic=%.2f entity=%.2f  %s",
+            epoch, task_idx + 1, tasks_total,
+            eval_result["semantic_score"], eval_result["entity_score"], verdict,
+        )
+
         task_result = {
             "task_score": eval_result["task_score"],
             "passed": eval_result["pass"],
@@ -171,8 +203,6 @@ class EpochRunner:
             "entity_score": eval_result["entity_score"],
             "tokens_spent": turn_result["tokens_spent"],
         }
-
-        self.logger.info("Task complete", extra=task_result)
         return task_result
 
     # ------------------------------------------------------------------
@@ -252,8 +282,8 @@ class EpochRunner:
         }
 
         self.logger.info(
-            "Epoch complete",
-            extra={"epoch": epoch, "success_rate": combined, "is_oom": self.budget.is_oom},
+            "[Epoch %d] Complete: SR=%.0f%%, frozen=%.0f%%, dynamic=%.0f%%, budget_remaining=%d",
+            epoch, combined * 100, frozen_sr * 100, dynamic_sr * 100, self.budget.remaining,
         )
         return epoch_result
 

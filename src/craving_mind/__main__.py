@@ -237,6 +237,10 @@ def main() -> None:
 
     for epoch in range(start_epoch, args.max_epochs):
         epoch_tasks = benchmark_loader.select_frozen_subset(all_frozen, tasks_per_epoch)
+        logger.info(
+            "[Epoch %d] Queuing %d tasks (budget: %d tokens)",
+            epoch, len(epoch_tasks), budget.remaining,
+        )
 
         result = runner.run_epoch(
             epoch=epoch,
@@ -264,12 +268,14 @@ def main() -> None:
         if result.get("artifact_path"):
             artifact_info = f" | artifact=v{artifact_manager._current_version}"
 
-        print(
-            f"Epoch {epoch:4d} | SR={result['success_rate']:.3f} "
-            f"| frozen={result['frozen_success_rate']:.3f} "
-            f"| saved={result['saved_tokens']:6d} "
-            f"| oom={result['is_oom']}"
-            f"{artifact_info}"
+        logger.info(
+            "Epoch %4d | SR=%.3f | frozen=%.3f | saved=%6d | oom=%s%s",
+            epoch,
+            result["success_rate"],
+            result["frozen_success_rate"],
+            result["saved_tokens"],
+            result["is_oom"],
+            artifact_info,
         )
 
     logger.info("Run complete", extra={"epochs_run": args.max_epochs - start_epoch})

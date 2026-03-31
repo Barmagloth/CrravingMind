@@ -280,7 +280,7 @@ class CLIProvider(LLMProvider):
 
         messages = self._trim_conversation(messages)
         prompt = self._build_prompt(messages, tools, system)
-        logger.debug(
+        logger.info(
             "CLIProvider.chat: prompt_len=%d max_tokens=%d session_id=%s",
             len(prompt), max_tokens, self._session_id,
         )
@@ -327,8 +327,10 @@ class CLIProvider(LLMProvider):
                                                   else vars(msg.usage))
                             if msg.session_id:
                                 self._session_id = msg.session_id
-                    logger.debug(
-                        "CLIProvider: success, total_chars=%d", sum(len(t) for t in collected_text)
+                    logger.info(
+                        "CLIProvider: response received, total_chars=%d (~%d tokens)",
+                        sum(len(t) for t in collected_text),
+                        max(1, sum(len(t) for t in collected_text) // 4),
                     )
                     return  # success — exit retry loop
                 except Exception as e:
