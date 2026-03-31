@@ -25,6 +25,40 @@ except ImportError:
     _ResultMessage = None  # type: ignore[assignment]
     _SDK_AVAILABLE = False
 
+
+def _patch_sdk_parser() -> None:
+    """Monkey-patch claude-code-sdk to skip unknown message types instead of raising.
+
+    SDK 0.0.25 raises MessageParseError on 'rate_limit_event' messages (and any
+    other future types it doesn't recognise). Patching parse_message to return
+    None for unknowns lets us skip them gracefully rather than retrying the whole
+    query. The async-for loop in CLIProvider._run() already skips None messages.
+    """
+    try:
+        from claude_code_sdk._internal import message_parser
+        from claude_code_sdk._errors import MessageParseError
+
+        _original_parse = message_parser.parse_message
+
+        def _patched_parse(data):  # type: ignore[no-untyped-def]
+            try:
+                return _original_parse(data)
+            except MessageParseError as exc:
+                msg_type = data.get("type", "<unknown>") if isinstance(data, dict) else "<non-dict>"
+                logger.debug(
+                    "SDK parse_message skipped unrecognised message type %r: %s",
+                    msg_type, exc,
+                )
+                return None
+
+        message_parser.parse_message = _patched_parse
+        logger.debug("claude-code-sdk message_parser patched to skip unknown types")
+    except Exception:  # pragma: no cover — only fails if SDK internals change
+        logger.debug("Could not patch claude-code-sdk message_parser", exc_info=True)
+
+
+_patch_sdk_parser()
+
 # Alias used in tests as patch target: craving_mind.agent.interface.query
 query = _sdk_query
 
@@ -261,6 +295,8 @@ class CLIProvider(LLMProvider):
                         attempt + 1, MAX_RETRIES, len(prompt),
                     )
                     async for msg in _query(prompt=prompt, options=options):
+                        if msg is None:
+                            continue  # patched-out unknown message type (e.g. rate_limit_event)
                         if _AssistantMessage and isinstance(msg, _AssistantMessage):
                             for block in msg.content:
                                 if _TextBlock and isinstance(block, _TextBlock):
