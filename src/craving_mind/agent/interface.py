@@ -2,10 +2,14 @@
 
 import asyncio
 import json
+import logging
 import os
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
 
 try:
     from claude_code_sdk import query as _sdk_query
@@ -237,6 +241,9 @@ class CLIProvider(LLMProvider):
             resume=self._session_id,
         )
 
+        MAX_RETRIES = 5
+        INITIAL_BACKOFF = 10  # seconds
+
         collected_text: list[str] = []
         usage_data: dict = {}
 
@@ -253,7 +260,26 @@ class CLIProvider(LLMProvider):
                     if msg.session_id:
                         self._session_id = msg.session_id
 
-        asyncio.run(_run())
+        for attempt in range(MAX_RETRIES):
+            collected_text.clear()
+            usage_data.clear()
+            try:
+                asyncio.run(_run())
+                break
+            except Exception as e:
+                is_rate_limit = (
+                    "rate_limit" in str(e).lower()
+                    or "MessageParseError" in type(e).__name__
+                )
+                if is_rate_limit and attempt < MAX_RETRIES - 1:
+                    wait = INITIAL_BACKOFF * (2 ** attempt)
+                    logger.warning(
+                        "Rate limited (attempt %d/%d), waiting %ds: %s",
+                        attempt + 1, MAX_RETRIES, wait, e,
+                    )
+                    time.sleep(wait)
+                else:
+                    raise
 
         raw_text = "".join(collected_text)
         content, tool_calls = self._parse_response(raw_text)
