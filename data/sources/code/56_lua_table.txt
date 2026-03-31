@@ -1,0 +1,200 @@
+/*
+** $Id: ltable.c $
+** Lua tables (hash)
+** See Copyright Notice in lua.h
+*/
+
+#define ltable_c
+#define LUA_CORE
+
+#include "lprefix.h"
+
+
+/*
+** Implementation of tables (aka arrays, objects, or hash tables).
+** Tables keep its elements in two parts: an array part and a hash part.
+** Non-negative integer keys are all candidates to be kept in the array
+** part. The actual size of the array is the largest 'n' such that
+** more than half the slots between 1 and n are in use.
+** Hash uses a mix of chained scatter table with Brent's variation.
+** A main invariant of these tables is that, if an element is not
+** in its main position (i.e. the 'original' position that its hash gives
+** to it), then the colliding element is in its own main position.
+** Hence even when the load factor reaches 100%, performance remains good.
+*/
+
+#include <math.h>
+#include <limits.h>
+#include <string.h>
+
+#include "lua.h"
+
+#include "ldebug.h"
+#include "ldo.h"
+#include "lgc.h"
+#include "lmem.h"
+#include "lobject.h"
+#include "lstate.h"
+#include "lstring.h"
+#include "ltable.h"
+#include "lvm.h"
+
+
+/*
+** Only hash parts with at least 2^LIMFORLAST have a 'lastfree' field
+** that optimizes finding a free slot. That field is stored just before
+** the array of nodes, in the same block. Smaller tables do a complete
+** search when looking for a free slot.
+*/
+#define LIMFORLAST    3  /* log2 of real limit (8) */
+
+/*
+** The union 'Limbox' stores 'lastfree' and ensures that what follows it
+** is properly aligned to store a Node.
+*/
+typedef struct { Node *dummy; Node follows_pNode; } Limbox_aux;
+
+typedef union {
+  Node *lastfree;
+  char padding[offsetof(Limbox_aux, follows_pNode)];
+} Limbox;
+
+#define haslastfree(t)     ((t)->lsizenode >= LIMFORLAST)
+#define getlastfree(t)     ((cast(Limbox *, (t)->node) - 1)->lastfree)
+
+
+/*
+** MAXABITS is the largest integer such that 2^MAXABITS fits in an
+** unsigned int.
+*/
+#define MAXABITS	(l_numbits(int) - 1)
+
+
+/*
+** MAXASIZEB is the maximum number of elements in the array part such
+** that the size of the array fits in 'size_t'.
+*/
+#define MAXASIZEB	(MAX_SIZET/(sizeof(Value) + 1))
+
+
+/*
+** MAXASIZE is the maximum size of the array part. It is the minimum
+** between 2^MAXABITS and MAXASIZEB.
+*/
+#define MAXASIZE  \
+    (((1u << MAXABITS) < MAXASIZEB) ? (1u << MAXABITS) : cast_uint(MAXASIZEB))
+
+/*
+** MAXHBITS is the largest integer such that 2^MAXHBITS fits in a
+** signed int.
+*/
+#define MAXHBITS	(MAXABITS - 1)
+
+
+/*
+** MAXHSIZE is the maximum size of the hash part. It is the minimum
+** between 2^MAXHBITS and the maximum size such that, measured in bytes,
+** it fits in a 'size_t'.
+*/
+#define MAXHSIZE	luaM_limitN(1 << MAXHBITS, Node)
+
+
+/*
+** When the original hash value is good, hashing by a power of 2
+** avoids the cost of '%'.
+*/
+#define hashpow2(t,n)		(gnode(t, lmod((n), sizenode(t))))
+
+/*
+** for other types, it is better to avoid modulo by power of 2, as
+** they can have many 2 factors.
+*/
+#define hashmod(t,n)	(gnode(t, ((n) % ((sizenode(t)-1u)|1u))))
+
+
+#define hashstr(t,str)		hashpow2(t, (str)->hash)
+#define hashboolean(t,p)	hashpow2(t, p)
+
+
+#define hashpointer(t,p)	hashmod(t, point2uint(p))
+
+
+#define dummynode		(&dummynode_)
+
+/*
+** Common hash part for tables with empty hash parts. That allows all
+** tables to have a hash part, avoiding an extra check ("is there a hash
+** part?") when indexing. Its sole node has an empty value and a key
+** (DEADKEY, NULL) that is different from any valid TValue.
+*/
+static const Node dummynode_ = {
+  {{NULL}, LUA_VEMPTY,  /* value's value and type */
+   LUA_TDEADKEY, 0, {NULL}}  /* key type, next, and key value */
+};
+
+
+static const TValue absentkey = {ABSTKEYCONSTANT};
+
+
+/*
+** Hash for integers. To allow a good hash, use the remainder operator
+** ('%'). If integer fits as a non-negative int, compute an int
+** remainder, which is faster. Otherwise, use an unsigned-integer
+** remainder, which uses all bits and ensures a non-negative result.
+*/
+static Node *hashint (const Table *t, lua_Integer i) {
+  lua_Unsigned ui = l_castS2U(i);
+  if (ui <= cast_uint(INT_MAX))
+    return gnode(t, cast_int(ui) % cast_int((sizenode(t)-1) | 1));
+  else
+    return hashmod(t, ui);
+}
+
+
+/*
+** Hash for floating-point numbers.
+** The main computation should be just
+**     n = frexp(n, &i); return (n * INT_MAX) + i
+** but there are some numerical subtleties.
+** In a two-complement representation, INT_MAX may not have an exact
+** representation as a float, but INT_MIN does; because the absolute
+** value of 'frexp' is smaller than 1 (unless 'n' is inf/NaN), the
+** absolute value of the product 'frexp * -INT_MIN' is smaller or equal
+** to INT_MAX. Next, the use of 'unsigned int' avoids overflows when
+** adding 'i'; the use of '~u' (instead of '-u') avoids problems with
+** INT_MIN.
+*/
+#if !defined(l_hashfloat)
+static unsigned l_hashfloat (lua_Number n) {
+  int i;
+  lua_Integer ni;
+  n = l_mathop(frexp)(n, &i) * -cast_num(INT_MIN);
+  if (!lua_numbertointeger(n, &ni)) {  /* is 'n' inf/-inf/NaN? */
+    lua_assert(luai_numisnan(n) || l_mathop(fabs)(n) == cast_num(HUGE_VAL));
+    return 0;
+  }
+  else {  /* normal case */
+    unsigned int u = cast_uint(i) + cast_uint(ni);
+    return (u <= cast_uint(INT_MAX) ? u : ~u);
+  }
+}
+#endif
+
+
+/*
+** returns the 'main' position of an element in a table (that is,
+** the index of its hash value).
+*/
+static Node *mainpositionTV (const Table *t, const TValue *key) {
+  switch (ttypetag(key)) {
+    case LUA_VNUMINT: {
+      lua_Integer i = ivalue(key);
+      return hashint(t, i);
+    }
+    case LUA_VNUMFLT: {
+      lua_Number n = fltvalue(key);
+      return hashmod(t, l_hashfloat(n));
+    }
+    case LUA_VSHRSTR: {
+      TString *ts = tsvalue(key);
+      return hashstr(t, ts);

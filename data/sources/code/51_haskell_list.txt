@@ -1,0 +1,200 @@
+{-# LANGUAGE Trustworthy #-}
+{-# LANGUAGE CPP, NoImplicitPrelude, ScopedTypeVariables #-}
+{-# LANGUAGE BangPatterns #-}
+{-# OPTIONS_GHC -Wno-incomplete-uni-patterns #-}
+
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  GHC.List
+-- Copyright   :  (c) The University of Glasgow 1994-2002
+-- License     :  see libraries/base/LICENSE
+--
+-- Maintainer  :  cvs-ghc@haskell.org
+-- Stability   :  internal
+-- Portability :  non-portable (GHC Extensions)
+--
+-- The List data type and its operations
+--
+-----------------------------------------------------------------------------
+
+module GHC.List (
+
+   -- The list data type
+   List,
+
+   -- List-monomorphic Foldable methods and misc functions
+   foldr, foldr', foldr1,
+   foldl, foldl', foldl1,
+   null, length, elem, notElem,
+   maximum, minimum, sum, product, and, or, any, all,
+
+   -- Other functions
+   foldl1', concat, concatMap,
+   map, (++), filter, lookup,
+   head, last, tail, init, uncons, unsnoc, (!?), (!!),
+   scanl, scanl1, scanl', scanr, scanr1,
+   iterate, iterate', repeat, replicate, cycle,
+   take, drop, splitAt, takeWhile, dropWhile, span, break, reverse,
+   zip, zip3, zipWith, zipWith3, unzip, unzip3,
+   errorEmptyList,
+
+   -- * GHC List fusion
+   augment, build,
+
+ ) where
+
+import Data.Maybe
+import GHC.Base
+import GHC.Num (Num(..))
+import GHC.Num.Integer (Integer)
+import GHC.Stack.Types (HasCallStack)
+
+infixl 9  !?, !!
+infix  4 `elem`, `notElem`
+
+-- $setup
+-- >>> import GHC.Base
+-- >>> import Prelude (Num (..), Ord (..), Int, Double, odd, not, undefined)
+-- >>> import Control.DeepSeq (force)
+--
+-- -- compiled versions are uninterruptible.
+-- https://gitlab.haskell.org/ghc/ghc/-/issues/367
+--
+-- >>> let or  = foldr (||) False
+-- >>> let and = foldr (&&) True
+
+--------------------------------------------------------------
+-- List-manipulation functions
+--------------------------------------------------------------
+
+-- | \(\mathcal{O}(1)\). Extract the first element of a list, which must be non-empty.
+--
+-- ===== __Examples__
+--
+-- >>> head [1, 2, 3]
+-- 1
+--
+-- >>> head [1..]
+-- 1
+--
+-- >>> head []
+-- *** Exception: Prelude.head: empty list
+head                    :: HasCallStack => [a] -> a
+head (x:_)              =  x
+head []                 =  badHead
+{-# NOINLINE [1] head #-}
+
+{-# WARNING in "x-partial" head "This is a partial function, it throws an error on empty lists. Use pattern matching or Data.List.uncons instead. Consider refactoring to use Data.List.NonEmpty." #-}
+
+badHead :: HasCallStack => a
+badHead = errorEmptyList "head"
+
+-- This rule is useful in cases like
+--      head [y | (x,y) <- ps, x==t]
+{-# RULES
+"head/build"    forall (g::forall b.(a->b->b)->b->b) .
+                head (build g) = g (\x _ -> x) badHead
+"head/augment"  forall xs (g::forall b. (a->b->b) -> b -> b) .
+                head (augment g xs) = g (\x _ -> x) (head xs)
+ #-}
+
+-- | \(\mathcal{O}(1)\). Decompose a list into its 'head' and 'tail'.
+--
+-- * If the list is empty, returns 'Nothing'.
+-- * If the list is non-empty, returns @'Just' (x, xs)@,
+-- where @x@ is the 'head' of the list and @xs@ its 'tail'.
+--
+-- @since 4.8.0.0
+--
+-- ==== __Examples__
+--
+-- >>> uncons []
+-- Nothing
+--
+-- >>> uncons [1]
+-- Just (1,[])
+--
+-- >>> uncons [1, 2, 3]
+-- Just (1,[2,3])
+uncons                  :: [a] -> Maybe (a, [a])
+uncons []               = Nothing
+uncons (x:xs)           = Just (x, xs)
+
+-- | \(\mathcal{O}(n)\). Decompose a list into 'init' and 'last'.
+--
+-- * If the list is empty, returns 'Nothing'.
+-- * If the list is non-empty, returns @'Just' (xs, x)@,
+-- where @xs@ is the 'init'ial part of the list and @x@ is its 'last' element.
+--
+--
+-- 'unsnoc' is dual to 'uncons': for a finite list @xs@
+--
+-- > unsnoc xs = (\(hd, tl) -> (reverse tl, hd)) <$> uncons (reverse xs)
+--
+-- ==== __Examples__
+--
+-- >>> unsnoc []
+-- Nothing
+--
+-- >>> unsnoc [1]
+-- Just ([],1)
+--
+-- >>> unsnoc [1, 2, 3]
+-- Just ([1,2],3)
+--
+-- ==== __Laziness__
+--
+-- >>> fst <$> unsnoc [undefined]
+-- Just []
+--
+-- >>> head . fst <$> unsnoc (1 : undefined)
+-- Just *** Exception: Prelude.undefined
+--
+-- >>> head . fst <$> unsnoc (1 : 2 : undefined)
+-- Just 1
+--
+-- @since 4.19.0.0
+unsnoc :: [a] -> Maybe ([a], a)
+-- The lazy pattern ~(a, b) is important to be productive on infinite lists
+-- and not to be prone to stack overflows.
+-- Expressing the recursion via 'foldr' provides for list fusion.
+unsnoc = foldr (\x -> Just . maybe ([], x) (\(~(a, b)) -> (x : a, b))) Nothing
+{-# INLINABLE unsnoc #-}
+
+-- | \(\mathcal{O}(1)\). Extract the elements after the head of a list, which
+-- must be non-empty.
+--
+-- ==== __Examples__
+--
+-- >>> tail [1, 2, 3]
+-- [2,3]
+--
+-- >>> tail [1]
+-- []
+--
+-- >>> tail []
+-- *** Exception: Prelude.tail: empty list
+tail                    :: HasCallStack => [a] -> [a]
+tail (_:xs)             =  xs
+tail []                 =  errorEmptyList "tail"
+
+{-# WARNING in "x-partial" tail "This is a partial function, it throws an error on empty lists. Replace it with drop 1, or use pattern matching or Data.List.uncons instead. Consider refactoring to use Data.List.NonEmpty." #-}
+
+-- | \(\mathcal{O}(n)\). Extract the last element of a list, which must be
+-- finite and non-empty.
+--
+-- WARNING: This function is partial. Consider using 'unsnoc' instead.
+--
+-- ==== __Examples__
+--
+-- >>> last [1, 2, 3]
+-- 3
+--
+-- >>> last [1..]
+-- * Hangs forever *
+--
+-- >>> last []
+-- *** Exception: Prelude.last: empty list
+last                    :: HasCallStack => [a] -> a
+#if defined(USE_REPORT_PRELUDE)
+last [x]                =  x

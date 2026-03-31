@@ -1,7 +1,3 @@
-# Title: Dijkstra's Algorithm for finding single source shortest path from scratch
-# Author: Shubham Malik
-# References: https://en.wikipedia.org/wiki/Dijkstra%27s_algorithm
-
 import math
 import sys
 

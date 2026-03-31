@@ -1,0 +1,34 @@
+       IDENTIFICATION DIVISION.
+       PROGRAM-ID.    HELLO-WORLD.
+       AUTHOR.        Public Domain.
+
+       ENVIRONMENT DIVISION.
+
+       DATA DIVISION.
+           WORKING-STORAGE SECTION.
+           01 GREETING        PIC X(13) VALUE "HELLO, WORLD!".
+           01 COUNTER         PIC 9(3)  VALUE ZERO.
+           01 LINE-COUNT      PIC 9(3)  VALUE ZERO.
+           01 REPORT-LINE.
+               05 RL-SEQ      PIC ZZZ9.
+               05 FILLER      PIC X(2)  VALUE ": ".
+               05 RL-TEXT     PIC X(40).
+
+       PROCEDURE DIVISION.
+       MAIN-PARA.
+           DISPLAY "COBOL HELLO WORLD DEMONSTRATION".
+           DISPLAY GREETING.
+           MOVE 1 TO COUNTER.
+           PERFORM LOOP-PARA UNTIL COUNTER > 10.
+           STOP RUN.
+
+       LOOP-PARA.
+           ADD 1 TO LINE-COUNT.
+           MOVE LINE-COUNT TO RL-SEQ.
+           MOVE GREETING    TO RL-TEXT.
+           DISPLAY REPORT-LINE.
+           ADD 1 TO COUNTER.
+
+       CLEANUP-PARA.
+           DISPLAY "DONE.".
+           STOP RUN.

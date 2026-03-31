@@ -1,0 +1,200 @@
+# SPDX-License-Identifier: GPL-2.0
+VERSION = 7
+PATCHLEVEL = 0
+SUBLEVEL = 0
+EXTRAVERSION = -rc6
+NAME = Baby Opossum Posse
+
+# *DOCUMENTATION*
+# To see a list of typical targets execute "make help"
+# More info can be located in ./README
+# Comments in this file are targeted only to the developer, do not
+# expect to learn how to build the kernel reading this file.
+
+ifeq ($(filter output-sync,$(.FEATURES)),)
+$(error GNU Make >= 4.0 is required. Your Make version is $(MAKE_VERSION))
+endif
+
+$(if $(filter __%, $(MAKECMDGOALS)), \
+	$(error targets prefixed with '__' are only for internal use))
+
+# That's our default target when none is given on the command line
+PHONY := __all
+__all:
+
+# We are using a recursive build, so we need to do a little thinking
+# to get the ordering right.
+#
+# Most importantly: sub-Makefiles should only ever modify files in
+# their own directory. If in some directory we have a dependency on
+# a file in another dir (which doesn't happen often, but it's often
+# unavoidable when linking the built-in.a targets which finally
+# turn into vmlinux), we will call a sub make in that other dir, and
+# after that we are sure that everything which is in that other dir
+# is now up to date.
+#
+# The only cases where we need to modify files which have global
+# effects are thus separated out and done before the recursive
+# descending is started. They are now explicitly listed as the
+# prepare rule.
+
+this-makefile := $(lastword $(MAKEFILE_LIST))
+abs_srctree := $(realpath $(dir $(this-makefile)))
+abs_output := $(CURDIR)
+
+ifneq ($(sub_make_done),1)
+
+# Do not use make's built-in rules and variables
+# (this increases performance and avoids hard-to-debug behaviour)
+MAKEFLAGS += -rR
+
+# Avoid funny character set dependencies
+unexport LC_ALL
+LC_COLLATE=C
+LC_NUMERIC=C
+export LC_COLLATE LC_NUMERIC
+
+# Avoid interference with shell env settings
+unexport GREP_OPTIONS
+
+# Beautify output
+# ---------------------------------------------------------------------------
+#
+# Most of build commands in Kbuild start with "cmd_". You can optionally define
+# "quiet_cmd_*". If defined, the short log is printed. Otherwise, no log from
+# that command is printed by default.
+#
+# e.g.)
+#    quiet_cmd_depmod = DEPMOD  $(MODLIB)
+#          cmd_depmod = $(srctree)/scripts/depmod.sh $(DEPMOD) $(KERNELRELEASE)
+#
+# A simple variant is to prefix commands with $(Q) - that's useful
+# for commands that shall be hidden in non-verbose mode.
+#
+#    $(Q)$(MAKE) $(build)=scripts/basic
+#
+# If KBUILD_VERBOSE contains 1, the whole command is echoed.
+# If KBUILD_VERBOSE contains 2, the reason for rebuilding is printed.
+#
+# To put more focus on warnings, be less verbose as default
+# Use 'make V=1' to see the full commands
+
+ifeq ("$(origin V)", "command line")
+  KBUILD_VERBOSE = $(V)
+endif
+
+quiet = quiet_
+Q = @
+
+ifneq ($(findstring 1, $(KBUILD_VERBOSE)),)
+  quiet =
+  Q =
+endif
+
+# If the user is running make -s (silent mode), suppress echoing of
+# commands
+ifneq ($(findstring s,$(firstword -$(MAKEFLAGS))),)
+quiet=silent_
+override KBUILD_VERBOSE :=
+endif
+
+export quiet Q KBUILD_VERBOSE
+
+# Call a source code checker (by default, "sparse") as part of the
+# C compilation.
+#
+# Use 'make C=1' to enable checking of only re-compiled files.
+# Use 'make C=2' to enable checking of *all* source files, regardless
+# of whether they are re-compiled or not.
+#
+# See the file "Documentation/dev-tools/sparse.rst" for more details,
+# including where to get the "sparse" utility.
+
+ifeq ("$(origin C)", "command line")
+  KBUILD_CHECKSRC = $(C)
+endif
+ifndef KBUILD_CHECKSRC
+  KBUILD_CHECKSRC = 0
+endif
+
+export KBUILD_CHECKSRC
+
+# Enable "clippy" (a linter) as part of the Rust compilation.
+#
+# Use 'make CLIPPY=1' to enable it.
+ifeq ("$(origin CLIPPY)", "command line")
+  KBUILD_CLIPPY := $(CLIPPY)
+endif
+
+export KBUILD_CLIPPY
+
+# Use make M=dir or set the environment variable KBUILD_EXTMOD to specify the
+# directory of external module to build. Setting M= takes precedence.
+ifeq ("$(origin M)", "command line")
+  KBUILD_EXTMOD := $(M)
+endif
+
+ifeq ("$(origin MO)", "command line")
+  KBUILD_EXTMOD_OUTPUT := $(MO)
+endif
+
+$(if $(word 2, $(KBUILD_EXTMOD)), \
+	$(error building multiple external modules is not supported))
+
+$(foreach x, % :, $(if $(findstring $x, $(KBUILD_EXTMOD)), \
+	$(error module directory path cannot contain '$x')))
+
+# Remove trailing slashes
+ifneq ($(filter %/, $(KBUILD_EXTMOD)),)
+KBUILD_EXTMOD := $(shell dirname $(KBUILD_EXTMOD).)
+endif
+
+export KBUILD_EXTMOD
+
+ifeq ("$(origin W)", "command line")
+  KBUILD_EXTRA_WARN := $(W)
+endif
+
+export KBUILD_EXTRA_WARN
+
+# Kbuild will save output files in the current working directory.
+# This does not need to match to the root of the kernel source tree.
+#
+# For example, you can do this:
+#
+#  cd /dir/to/store/output/files; make -f /dir/to/kernel/source/Makefile
+#
+# If you want to save output files in a different location, there are
+# two syntaxes to specify it.
+#
+# 1) O=
+# Use "make O=dir/to/store/output/files/"
+#
+# 2) Set KBUILD_OUTPUT
+# Set the environment variable KBUILD_OUTPUT to point to the output directory.
+# export KBUILD_OUTPUT=dir/to/store/output/files/; make
+#
+# The O= assignment takes precedence over the KBUILD_OUTPUT environment
+# variable.
+
+ifeq ("$(origin O)", "command line")
+  KBUILD_OUTPUT := $(O)
+endif
+
+ifdef KBUILD_EXTMOD
+    ifdef KBUILD_OUTPUT
+        objtree := $(realpath $(KBUILD_OUTPUT))
+        $(if $(objtree),,$(error specified kernel directory "$(KBUILD_OUTPUT)" does not exist))
+    else
+        objtree := $(abs_srctree)
+    endif
+    # If Make is invoked from the kernel directory (either kernel
+    # source directory or kernel build directory), external modules
+    # are built in $(KBUILD_EXTMOD) for backward compatibility,
+    # otherwise, built in the current directory.
+    output := $(or $(KBUILD_EXTMOD_OUTPUT),$(if $(filter $(CURDIR),$(objtree) $(abs_srctree)),$(KBUILD_EXTMOD)))
+    # KBUILD_EXTMOD might be a relative path. Remember its absolute path before
+    # Make changes the working directory.
+    srcroot := $(realpath $(KBUILD_EXTMOD))
+    $(if $(srcroot),,$(error specified external module directory "$(KBUILD_EXTMOD)" does not exist))
+else

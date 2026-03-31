@@ -1,0 +1,200 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ *	header.S
+ *
+ *	Copyright (C) 1991, 1992 Linus Torvalds
+ *
+ *	Based on bootsect.S and setup.S
+ *	modified by more people than can be counted
+ *
+ *	Rewritten as a common file by H. Peter Anvin (Apr 2007)
+ *
+ * BIG FAT NOTE: We're in real mode using 64k segments.  Therefore segment
+ * addresses must be multiplied by 16 to obtain their respective linear
+ * addresses. To avoid confusion, linear addresses are written using leading
+ * hex while segment addresses are written as segment:offset.
+ *
+ */
+#include <linux/pe.h>
+#include <asm/segment.h>
+#include <asm/boot.h>
+#include <asm/page_types.h>
+#include <asm/setup.h>
+#include <asm/bootparam.h>
+#include "boot.h"
+#include "voffset.h"
+#include "zoffset.h"
+
+BOOTSEG		= 0x07C0		/* original address of boot-sector */
+SYSSEG		= 0x1000		/* historical load address >> 4 */
+
+#ifndef SVGA_MODE
+#define SVGA_MODE ASK_VGA
+#endif
+
+#ifndef ROOT_RDONLY
+#define ROOT_RDONLY 1
+#endif
+
+	.set	salign, 0x1000
+	.set	falign, 0x200
+
+	.code16
+	.section ".bstext", "ax"
+#ifdef CONFIG_EFI_STUB
+	# "MZ", MS-DOS header
+	.word	IMAGE_DOS_SIGNATURE
+	.org	0x38
+	#
+	# Offset to the PE header.
+	#
+	.long	LINUX_PE_MAGIC
+	.long	pe_header
+pe_header:
+	.long	IMAGE_NT_SIGNATURE
+
+coff_header:
+#ifdef CONFIG_X86_32
+	.set	image_file_add_flags, IMAGE_FILE_32BIT_MACHINE
+	.set	pe_opt_magic, IMAGE_NT_OPTIONAL_HDR32_MAGIC
+	.word	IMAGE_FILE_MACHINE_I386
+#else
+	.set	image_file_add_flags, 0
+	.set	pe_opt_magic, IMAGE_NT_OPTIONAL_HDR64_MAGIC
+	.word	IMAGE_FILE_MACHINE_AMD64
+#endif
+	.word	section_count			# nr_sections
+	.long	0 				# TimeDateStamp
+	.long	0				# PointerToSymbolTable
+	.long	1				# NumberOfSymbols
+	.word	section_table - optional_header	# SizeOfOptionalHeader
+	.word	IMAGE_FILE_EXECUTABLE_IMAGE	| \
+		image_file_add_flags		| \
+		IMAGE_FILE_DEBUG_STRIPPED	| \
+		IMAGE_FILE_LINE_NUMS_STRIPPED	# Characteristics
+
+optional_header:
+	.word	pe_opt_magic
+	.byte	0x02				# MajorLinkerVersion
+	.byte	0x14				# MinorLinkerVersion
+
+	.long	ZO__data			# SizeOfCode
+
+	.long	ZO__end - ZO__data		# SizeOfInitializedData
+	.long	0				# SizeOfUninitializedData
+
+	.long	setup_size + ZO_efi_pe_entry	# AddressOfEntryPoint
+
+	.long	setup_size			# BaseOfCode
+#ifdef CONFIG_X86_32
+	.long	0				# data
+#endif
+
+extra_header_fields:
+#ifdef CONFIG_X86_32
+	.long	0				# ImageBase
+#else
+	.quad	0				# ImageBase
+#endif
+	.long	salign				# SectionAlignment
+	.long	falign				# FileAlignment
+	.word	0				# MajorOperatingSystemVersion
+	.word	0				# MinorOperatingSystemVersion
+	.word	LINUX_EFISTUB_MAJOR_VERSION	# MajorImageVersion
+	.word	LINUX_EFISTUB_MINOR_VERSION	# MinorImageVersion
+	.word	0				# MajorSubsystemVersion
+	.word	0				# MinorSubsystemVersion
+	.long	0				# Win32VersionValue
+
+	.long	setup_size + ZO__end		# SizeOfImage
+
+	.long	salign				# SizeOfHeaders
+	.long	0				# CheckSum
+	.word	IMAGE_SUBSYSTEM_EFI_APPLICATION	# Subsystem (EFI application)
+	.word	IMAGE_DLLCHARACTERISTICS_NX_COMPAT	# DllCharacteristics
+#ifdef CONFIG_X86_32
+	.long	0				# SizeOfStackReserve
+	.long	0				# SizeOfStackCommit
+	.long	0				# SizeOfHeapReserve
+	.long	0				# SizeOfHeapCommit
+#else
+	.quad	0				# SizeOfStackReserve
+	.quad	0				# SizeOfStackCommit
+	.quad	0				# SizeOfHeapReserve
+	.quad	0				# SizeOfHeapCommit
+#endif
+	.long	0				# LoaderFlags
+	.long	(section_table - .) / 8		# NumberOfRvaAndSizes
+
+	.quad	0				# ExportTable
+	.quad	0				# ImportTable
+	.quad	0				# ResourceTable
+	.quad	0				# ExceptionTable
+	.quad	0				# CertificationTable
+	.quad	0				# BaseRelocationTable
+
+	# Section table
+section_table:
+	.ascii	".setup"
+	.byte	0
+	.byte	0
+	.long	pecompat_fstart - salign 	# VirtualSize
+	.long	salign				# VirtualAddress
+	.long	pecompat_fstart - salign	# SizeOfRawData
+	.long	salign				# PointerToRawData
+
+	.long	0, 0, 0
+	.long	IMAGE_SCN_CNT_INITIALIZED_DATA	| \
+		IMAGE_SCN_MEM_READ		| \
+		IMAGE_SCN_MEM_DISCARDABLE	# Characteristics
+
+#ifdef CONFIG_EFI_MIXED
+	.asciz	".compat"
+
+	.long	pecompat_fsize			# VirtualSize
+	.long	pecompat_fstart			# VirtualAddress
+	.long	pecompat_fsize			# SizeOfRawData
+	.long	pecompat_fstart			# PointerToRawData
+
+	.long	0, 0, 0
+	.long	IMAGE_SCN_CNT_INITIALIZED_DATA	| \
+		IMAGE_SCN_MEM_READ		| \
+		IMAGE_SCN_MEM_DISCARDABLE	# Characteristics
+
+	/*
+	 * Put the IA-32 machine type and the associated entry point address in
+	 * the .compat section, so loaders can figure out which other execution
+	 * modes this image supports.
+	 */
+	.pushsection ".pecompat", "a", @progbits
+	.balign	salign
+	.globl	pecompat_fstart
+pecompat_fstart:
+	.byte	0x1				# Version
+	.byte	8				# Size
+	.word	IMAGE_FILE_MACHINE_I386		# PE machine type
+	.long	setup_size + ZO_efi32_pe_entry	# Entrypoint
+	.byte	0x0				# Sentinel
+	.popsection
+#else
+	.set	pecompat_fstart, setup_size
+#endif
+	.ascii	".text\0\0\0"
+	.long	textsize            		# VirtualSize
+	.long	setup_size			# VirtualAddress
+	.long	textsize			# SizeOfRawData
+	.long	setup_size			# PointerToRawData
+	.long	0				# PointerToRelocations
+	.long	0				# PointerToLineNumbers
+	.word	0				# NumberOfRelocations
+	.word	0				# NumberOfLineNumbers
+	.long	IMAGE_SCN_CNT_CODE		| \
+		IMAGE_SCN_MEM_READ		| \
+		IMAGE_SCN_MEM_EXECUTE		# Characteristics
+
+#ifdef CONFIG_EFI_SBAT
+	.ascii	".sbat\0\0\0"
+	.long	ZO__esbat - ZO__sbat            # VirtualSize
+	.long	setup_size + ZO__sbat           # VirtualAddress
+	.long	ZO__esbat - ZO__sbat            # SizeOfRawData
+	.long	setup_size + ZO__sbat           # PointerToRawData

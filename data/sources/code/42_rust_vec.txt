@@ -1,0 +1,200 @@
+//! A contiguous growable array type with heap-allocated contents, written
+//! `Vec<T>`.
+//!
+//! Vectors have *O*(1) indexing, amortized *O*(1) push (to the end) and
+//! *O*(1) pop (from the end).
+//!
+//! Vectors ensure they never allocate more than `isize::MAX` bytes.
+//!
+//! # Examples
+//!
+//! You can explicitly create a [`Vec`] with [`Vec::new`]:
+//!
+//! ```
+//! let v: Vec<i32> = Vec::new();
+//! ```
+//!
+//! ...or by using the [`vec!`] macro:
+//!
+//! ```
+//! let v: Vec<i32> = vec![];
+//!
+//! let v = vec![1, 2, 3, 4, 5];
+//!
+//! let v = vec![0; 10]; // ten zeroes
+//! ```
+//!
+//! You can [`push`] values onto the end of a vector (which will grow the vector
+//! as needed):
+//!
+//! ```
+//! let mut v = vec![1, 2];
+//!
+//! v.push(3);
+//! ```
+//!
+//! Popping values works in much the same way:
+//!
+//! ```
+//! let mut v = vec![1, 2];
+//!
+//! let two = v.pop();
+//! ```
+//!
+//! Vectors also support indexing (through the [`Index`] and [`IndexMut`] traits):
+//!
+//! ```
+//! let mut v = vec![1, 2, 3];
+//! let three = v[2];
+//! v[1] = v[1] + 5;
+//! ```
+//!
+//! # Memory layout
+//!
+//! When the type is non-zero-sized and the capacity is nonzero, [`Vec`] uses the [`Global`]
+//! allocator for its allocation. It is valid to convert both ways between such a [`Vec`] and a raw
+//! pointer allocated with the [`Global`] allocator, provided that the [`Layout`] used with the
+//! allocator is correct for a sequence of `capacity` elements of the type, and the first `len`
+//! values pointed to by the raw pointer are valid. More precisely, a `ptr: *mut T` that has been
+//! allocated with the [`Global`] allocator with [`Layout::array::<T>(capacity)`][Layout::array] may
+//! be converted into a vec using
+//! [`Vec::<T>::from_raw_parts(ptr, len, capacity)`](Vec::from_raw_parts). Conversely, the memory
+//! backing a `value: *mut T` obtained from [`Vec::<T>::as_mut_ptr`] may be deallocated using the
+//! [`Global`] allocator with the same layout.
+//!
+//! For zero-sized types (ZSTs), or when the capacity is zero, the `Vec` pointer must be non-null
+//! and sufficiently aligned. The recommended way to build a `Vec` of ZSTs if [`vec!`] cannot be
+//! used is to use [`ptr::NonNull::dangling`].
+//!
+//! [`push`]: Vec::push
+//! [`ptr::NonNull::dangling`]: NonNull::dangling
+//! [`Layout`]: crate::alloc::Layout
+//! [Layout::array]: crate::alloc::Layout::array
+
+#![stable(feature = "rust1", since = "1.0.0")]
+
+#[cfg(not(no_global_oom_handling))]
+use core::clone::TrivialClone;
+use core::cmp::Ordering;
+use core::hash::{Hash, Hasher};
+#[cfg(not(no_global_oom_handling))]
+use core::iter;
+#[cfg(not(no_global_oom_handling))]
+use core::marker::Destruct;
+use core::marker::{Freeze, PhantomData};
+use core::mem::{self, Assume, ManuallyDrop, MaybeUninit, SizedTypeProperties, TransmuteFrom};
+use core::ops::{self, Index, IndexMut, Range, RangeBounds};
+use core::ptr::{self, NonNull};
+use core::slice::{self, SliceIndex};
+use core::{cmp, fmt, hint, intrinsics, ub_checks};
+
+#[stable(feature = "extract_if", since = "1.87.0")]
+pub use self::extract_if::ExtractIf;
+use crate::alloc::{Allocator, Global};
+use crate::borrow::{Cow, ToOwned};
+use crate::boxed::Box;
+use crate::collections::TryReserveError;
+use crate::raw_vec::RawVec;
+
+mod extract_if;
+
+#[cfg(not(no_global_oom_handling))]
+#[stable(feature = "vec_splice", since = "1.21.0")]
+pub use self::splice::Splice;
+
+#[cfg(not(no_global_oom_handling))]
+mod splice;
+
+#[stable(feature = "drain", since = "1.6.0")]
+pub use self::drain::Drain;
+
+mod drain;
+
+#[cfg(not(no_global_oom_handling))]
+mod cow;
+
+#[cfg(not(no_global_oom_handling))]
+pub(crate) use self::in_place_collect::AsVecIntoIter;
+#[stable(feature = "rust1", since = "1.0.0")]
+pub use self::into_iter::IntoIter;
+
+mod into_iter;
+
+#[cfg(not(no_global_oom_handling))]
+use self::is_zero::IsZero;
+
+#[cfg(not(no_global_oom_handling))]
+mod is_zero;
+
+#[cfg(not(no_global_oom_handling))]
+mod in_place_collect;
+
+mod partial_eq;
+
+#[unstable(feature = "vec_peek_mut", issue = "122742")]
+pub use self::peek_mut::PeekMut;
+
+mod peek_mut;
+
+#[cfg(not(no_global_oom_handling))]
+use self::spec_from_elem::SpecFromElem;
+
+#[cfg(not(no_global_oom_handling))]
+mod spec_from_elem;
+
+#[cfg(not(no_global_oom_handling))]
+use self::set_len_on_drop::SetLenOnDrop;
+
+#[cfg(not(no_global_oom_handling))]
+mod set_len_on_drop;
+
+#[cfg(not(no_global_oom_handling))]
+use self::in_place_drop::{InPlaceDrop, InPlaceDstDataSrcBufDrop};
+
+#[cfg(not(no_global_oom_handling))]
+mod in_place_drop;
+
+#[cfg(not(no_global_oom_handling))]
+use self::spec_from_iter_nested::SpecFromIterNested;
+
+#[cfg(not(no_global_oom_handling))]
+mod spec_from_iter_nested;
+
+#[cfg(not(no_global_oom_handling))]
+use self::spec_from_iter::SpecFromIter;
+
+#[cfg(not(no_global_oom_handling))]
+mod spec_from_iter;
+
+#[cfg(not(no_global_oom_handling))]
+use self::spec_extend::SpecExtend;
+
+#[cfg(not(no_global_oom_handling))]
+mod spec_extend;
+
+/// A contiguous growable array type, written as `Vec<T>`, short for 'vector'.
+///
+/// # Examples
+///
+/// ```
+/// let mut vec = Vec::new();
+/// vec.push(1);
+/// vec.push(2);
+///
+/// assert_eq!(vec.len(), 2);
+/// assert_eq!(vec[0], 1);
+///
+/// assert_eq!(vec.pop(), Some(2));
+/// assert_eq!(vec.len(), 1);
+///
+/// vec[0] = 7;
+/// assert_eq!(vec[0], 7);
+///
+/// vec.extend([1, 2, 3]);
+///
+/// for x in &vec {
+///     println!("{x}");
+/// }
+/// assert_eq!(vec, [7, 1, 2, 3]);
+/// ```
+///

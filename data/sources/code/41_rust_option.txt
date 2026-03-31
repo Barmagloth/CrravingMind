@@ -1,0 +1,200 @@
+//! Optional values.
+//!
+//! Type [`Option`] represents an optional value: every [`Option`]
+//! is either [`Some`] and contains a value, or [`None`], and
+//! does not. [`Option`] types are very common in Rust code, as
+//! they have a number of uses:
+//!
+//! * Initial values
+//! * Return values for functions that are not defined
+//!   over their entire input range (partial functions)
+//! * Return value for otherwise reporting simple errors, where [`None`] is
+//!   returned on error
+//! * Optional struct fields
+//! * Struct fields that can be loaned or "taken"
+//! * Optional function arguments
+//! * Nullable pointers
+//! * Swapping things out of difficult situations
+//!
+//! [`Option`]s are commonly paired with pattern matching to query the presence
+//! of a value and take action, always accounting for the [`None`] case.
+//!
+//! ```
+//! fn divide(numerator: f64, denominator: f64) -> Option<f64> {
+//!     if denominator == 0.0 {
+//!         None
+//!     } else {
+//!         Some(numerator / denominator)
+//!     }
+//! }
+//!
+//! // The return value of the function is an option
+//! let result = divide(2.0, 3.0);
+//!
+//! // Pattern match to retrieve the value
+//! match result {
+//!     // The division was valid
+//!     Some(x) => println!("Result: {x}"),
+//!     // The division was invalid
+//!     None    => println!("Cannot divide by 0"),
+//! }
+//! ```
+//!
+//
+// FIXME: Show how `Option` is used in practice, with lots of methods
+//
+//! # Options and pointers ("nullable" pointers)
+//!
+//! Rust's pointer types must always point to a valid location; there are
+//! no "null" references. Instead, Rust has *optional* pointers, like
+//! the optional owned box, <code>[Option]<[Box\<T>]></code>.
+//!
+//! [Box\<T>]: ../../std/boxed/struct.Box.html
+//!
+//! The following example uses [`Option`] to create an optional box of
+//! [`i32`]. Notice that in order to use the inner [`i32`] value, the
+//! `check_optional` function first needs to use pattern matching to
+//! determine whether the box has a value (i.e., it is [`Some(...)`][`Some`]) or
+//! not ([`None`]).
+//!
+//! ```
+//! let optional = None;
+//! check_optional(optional);
+//!
+//! let optional = Some(Box::new(9000));
+//! check_optional(optional);
+//!
+//! fn check_optional(optional: Option<Box<i32>>) {
+//!     match optional {
+//!         Some(p) => println!("has value {p}"),
+//!         None => println!("has no value"),
+//!     }
+//! }
+//! ```
+//!
+//! # The question mark operator, `?`
+//!
+//! Similar to the [`Result`] type, when writing code that calls many functions that return the
+//! [`Option`] type, handling `Some`/`None` can be tedious. The question mark
+//! operator, [`?`], hides some of the boilerplate of propagating values
+//! up the call stack.
+//!
+//! It replaces this:
+//!
+//! ```
+//! # #![allow(dead_code)]
+//! fn add_last_numbers(stack: &mut Vec<i32>) -> Option<i32> {
+//!     let a = stack.pop();
+//!     let b = stack.pop();
+//!
+//!     match (a, b) {
+//!         (Some(x), Some(y)) => Some(x + y),
+//!         _ => None,
+//!     }
+//! }
+//!
+//! ```
+//!
+//! With this:
+//!
+//! ```
+//! # #![allow(dead_code)]
+//! fn add_last_numbers(stack: &mut Vec<i32>) -> Option<i32> {
+//!     Some(stack.pop()? + stack.pop()?)
+//! }
+//! ```
+//!
+//! *It's much nicer!*
+//!
+//! Ending the expression with [`?`] will result in the [`Some`]'s unwrapped value, unless the
+//! result is [`None`], in which case [`None`] is returned early from the enclosing function.
+//!
+//! [`?`] can be used in functions that return [`Option`] because of the
+//! early return of [`None`] that it provides.
+//!
+//! [`?`]: crate::ops::Try
+//! [`Some`]: Some
+//! [`None`]: None
+//!
+//! # Representation
+//!
+//! Rust guarantees to optimize the following types `T` such that [`Option<T>`]
+//! has the same size, alignment, and [function call ABI] as `T`. It is
+//! therefore sound, when `T` is one of these types, to transmute a value `t` of
+//! type `T` to type `Option<T>` (producing the value `Some(t)`) and to
+//! transmute a value `Some(t)` of type `Option<T>` to type `T` (producing the
+//! value `t`).
+//!
+//! In some of these cases, Rust further guarantees the following:
+//! - `transmute::<_, Option<T>>([0u8; size_of::<T>()])` is sound and produces
+//!   `Option::<T>::None`
+//! - `transmute::<_, [u8; size_of::<T>()]>(Option::<T>::None)` is sound and produces
+//!   `[0u8; size_of::<T>()]`
+//!
+//! These cases are identified by the second column:
+//!
+//! | `T`                                                                 | Transmuting between `[0u8; size_of::<T>()]` and `Option::<T>::None` sound? |
+//! |---------------------------------------------------------------------|----------------------------------------------------------------------------|
+//! | [`Box<U>`] (specifically, only `Box<U, Global>`)                    | when `U: Sized`                                                            |
+//! | `&U`                                                                | when `U: Sized`                                                            |
+//! | `&mut U`                                                            | when `U: Sized`                                                            |
+//! | `fn`, `extern "C" fn`[^extern_fn]                                   | always                                                                     |
+//! | [`num::NonZero*`]                                                   | always                                                                     |
+//! | [`ptr::NonNull<U>`]                                                 | when `U: Sized`                                                            |
+//! | `#[repr(transparent)]` struct around one of the types in this list. | when it holds for the inner type                                           |
+//!
+//! [^extern_fn]: this remains true for `unsafe` variants, any argument/return types, and any other ABI: `[unsafe] extern "abi" fn` (_e.g._, `extern "system" fn`)
+//!
+//! Under some conditions the above types `T` are also null pointer optimized when wrapped in a [`Result`][result_repr].
+//!
+//! [`Box<U>`]: ../../std/boxed/struct.Box.html
+//! [`num::NonZero*`]: crate::num
+//! [`ptr::NonNull<U>`]: crate::ptr::NonNull
+//! [function call ABI]: ../primitive.fn.html#abi-compatibility
+//! [result_repr]: crate::result#representation
+//!
+//! This is called the "null pointer optimization" or NPO.
+//!
+//! It is further guaranteed that, for the cases above, one can
+//! [`mem::transmute`] from all valid values of `T` to `Option<T>` and
+//! from `Some::<T>(_)` to `T` (but transmuting `None::<T>` to `T`
+//! is undefined behavior).
+//!
+//! # Method overview
+//!
+//! In addition to working with pattern matching, [`Option`] provides a wide
+//! variety of different methods.
+//!
+//! ## Querying the variant
+//!
+//! The [`is_some`] and [`is_none`] methods return [`true`] if the [`Option`]
+//! is [`Some`] or [`None`], respectively.
+//!
+//! The [`is_some_and`] and [`is_none_or`] methods apply the provided function
+//! to the contents of the [`Option`] to produce a boolean value.
+//! If this is [`None`] then a default result is returned instead without executing the function.
+//!
+//! [`is_none`]: Option::is_none
+//! [`is_some`]: Option::is_some
+//! [`is_some_and`]: Option::is_some_and
+//! [`is_none_or`]: Option::is_none_or
+//!
+//! ## Adapters for working with references
+//!
+//! * [`as_ref`] converts from <code>[&][][Option]\<T></code> to <code>[Option]<[&]T></code>
+//! * [`as_mut`] converts from <code>[&mut] [Option]\<T></code> to <code>[Option]<[&mut] T></code>
+//! * [`as_deref`] converts from <code>[&][][Option]\<T></code> to
+//!   <code>[Option]<[&]T::[Target]></code>
+//! * [`as_deref_mut`] converts from <code>[&mut] [Option]\<T></code> to
+//!   <code>[Option]<[&mut] T::[Target]></code>
+//! * [`as_pin_ref`] converts from <code>[Pin]<[&][][Option]\<T>></code> to
+//!   <code>[Option]<[Pin]<[&]T>></code>
+//! * [`as_pin_mut`] converts from <code>[Pin]<[&mut] [Option]\<T>></code> to
+//!   <code>[Option]<[Pin]<[&mut] T>></code>
+//! * [`as_slice`] returns a one-element slice of the contained value, if any.
+//!   If this is [`None`], an empty slice is returned.
+//! * [`as_mut_slice`] returns a mutable one-element slice of the contained value, if any.
+//!   If this is [`None`], an empty slice is returned.
+//!
+//! [&]: reference "shared reference"
+//! [&mut]: reference "mutable reference"

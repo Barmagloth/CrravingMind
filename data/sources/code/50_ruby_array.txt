@@ -1,0 +1,200 @@
+/**********************************************************************
+
+  array.c -
+
+  $Author$
+  created at: Fri Aug  6 09:46:12 JST 1993
+
+  Copyright (C) 1993-2007 Yukihiro Matsumoto
+  Copyright (C) 2000  Network Applied Communication Laboratory, Inc.
+  Copyright (C) 2000  Information-technology Promotion Agency, Japan
+
+**********************************************************************/
+
+#include "debug_counter.h"
+#include "id.h"
+#include "internal.h"
+#include "internal/array.h"
+#include "internal/compar.h"
+#include "internal/enum.h"
+#include "internal/gc.h"
+#include "internal/hash.h"
+#include "internal/numeric.h"
+#include "internal/object.h"
+#include "internal/proc.h"
+#include "internal/rational.h"
+#include "internal/vm.h"
+#include "probes.h"
+#include "ruby/encoding.h"
+#include "ruby/st.h"
+#include "ruby/thread.h"
+#include "ruby/util.h"
+#include "ruby/ractor.h"
+#include "vm_core.h"
+#include "builtin.h"
+
+#if !ARRAY_DEBUG
+# undef NDEBUG
+# define NDEBUG
+#endif
+#include "ruby_assert.h"
+
+VALUE rb_cArray;
+VALUE rb_cArray_empty_frozen;
+
+/* Flags of RArray
+ *
+ * 0:   RARRAY_SHARED_FLAG (equal to ELTS_SHARED)
+ *          The array is shared. The buffer this array points to is owned by
+ *          another array (the shared root).
+ * 1:   RARRAY_EMBED_FLAG
+ *          The array is embedded (its contents follow the header, rather than
+ *          being on a separately allocated buffer).
+ * 3-9: RARRAY_EMBED_LEN
+ *          The length of the array when RARRAY_EMBED_FLAG is set.
+ * 12:  RARRAY_SHARED_ROOT_FLAG
+ *          The array is a shared root that does reference counting. The buffer
+ *          this array points to is owned by this array but may be pointed to
+ *          by other arrays.
+ *          Note: Frozen arrays may be a shared root without this flag being
+ *                set. Frozen arrays do not have reference counting because
+ *                they cannot be modified. Not updating the reference count
+ *                improves copy-on-write performance. Their reference count is
+ *                assumed to be infinity.
+ * 14:  RARRAY_PTR_IN_USE_FLAG
+ *          The buffer of the array is in use. This is only used during
+ *          debugging.
+ */
+
+/* for OPTIMIZED_CMP: */
+#define id_cmp idCmp
+
+#define ARY_DEFAULT_SIZE 16
+#define ARY_MAX_SIZE (LONG_MAX / (int)sizeof(VALUE))
+#define SMALL_ARRAY_LEN 16
+
+RBIMPL_ATTR_MAYBE_UNUSED()
+static int
+should_be_T_ARRAY(VALUE ary)
+{
+    return RB_TYPE_P(ary, T_ARRAY);
+}
+
+#define ARY_HEAP_PTR(a) (RUBY_ASSERT(!ARY_EMBED_P(a)), RARRAY(a)->as.heap.ptr)
+#define ARY_HEAP_LEN(a) (RUBY_ASSERT(!ARY_EMBED_P(a)), RARRAY(a)->as.heap.len)
+#define ARY_HEAP_CAPA(a) (RUBY_ASSERT(!ARY_EMBED_P(a)), RUBY_ASSERT(!ARY_SHARED_ROOT_P(a)), \
+                          RARRAY(a)->as.heap.aux.capa)
+
+#define ARY_EMBED_PTR(a) (RUBY_ASSERT(ARY_EMBED_P(a)), RARRAY(a)->as.ary)
+#define ARY_EMBED_LEN(a) \
+    (RUBY_ASSERT(ARY_EMBED_P(a)), \
+     (long)((RBASIC(a)->flags >> RARRAY_EMBED_LEN_SHIFT) & \
+         (RARRAY_EMBED_LEN_MASK >> RARRAY_EMBED_LEN_SHIFT)))
+#define ARY_HEAP_SIZE(a) (RUBY_ASSERT(!ARY_EMBED_P(a)), RUBY_ASSERT(ARY_OWNS_HEAP_P(a)), ARY_CAPA(a) * sizeof(VALUE))
+
+#define ARY_OWNS_HEAP_P(a) (RUBY_ASSERT(should_be_T_ARRAY((VALUE)(a))), \
+                            !FL_TEST_RAW((a), RARRAY_SHARED_FLAG|RARRAY_EMBED_FLAG))
+
+#define FL_SET_EMBED(a) do { \
+    RUBY_ASSERT(!ARY_SHARED_P(a)); \
+    FL_SET((a), RARRAY_EMBED_FLAG); \
+    ary_verify(a); \
+} while (0)
+
+#define FL_UNSET_EMBED(ary) FL_UNSET((ary), RARRAY_EMBED_FLAG|RARRAY_EMBED_LEN_MASK)
+#define FL_SET_SHARED(ary) do { \
+    RUBY_ASSERT(!ARY_EMBED_P(ary)); \
+    FL_SET((ary), RARRAY_SHARED_FLAG); \
+} while (0)
+#define FL_UNSET_SHARED(ary) FL_UNSET((ary), RARRAY_SHARED_FLAG)
+
+#define ARY_SET_PTR_FORCE(ary, p) \
+    (RARRAY(ary)->as.heap.ptr = (p))
+#define ARY_SET_PTR(ary, p) do { \
+    RUBY_ASSERT(!ARY_EMBED_P(ary)); \
+    RUBY_ASSERT(!OBJ_FROZEN(ary)); \
+    ARY_SET_PTR_FORCE(ary, p); \
+} while (0)
+#define ARY_SET_EMBED_LEN(ary, n) do { \
+    long tmp_n = (n); \
+    RUBY_ASSERT(ARY_EMBED_P(ary)); \
+    RBASIC(ary)->flags &= ~RARRAY_EMBED_LEN_MASK; \
+    RBASIC(ary)->flags |= (tmp_n) << RARRAY_EMBED_LEN_SHIFT; \
+} while (0)
+#define ARY_SET_HEAP_LEN(ary, n) do { \
+    RUBY_ASSERT(!ARY_EMBED_P(ary)); \
+    RARRAY(ary)->as.heap.len = (n); \
+} while (0)
+#define ARY_SET_LEN(ary, n) do { \
+    if (ARY_EMBED_P(ary)) { \
+        ARY_SET_EMBED_LEN((ary), (n)); \
+    } \
+    else { \
+        ARY_SET_HEAP_LEN((ary), (n)); \
+    } \
+    RUBY_ASSERT(RARRAY_LEN(ary) == (n)); \
+} while (0)
+#define ARY_INCREASE_PTR(ary, n) do  { \
+    RUBY_ASSERT(!ARY_EMBED_P(ary)); \
+    RUBY_ASSERT(!OBJ_FROZEN(ary)); \
+    RARRAY(ary)->as.heap.ptr += (n); \
+} while (0)
+#define ARY_INCREASE_LEN(ary, n) do  { \
+    RUBY_ASSERT(!OBJ_FROZEN(ary)); \
+    if (ARY_EMBED_P(ary)) { \
+        ARY_SET_EMBED_LEN((ary), RARRAY_LEN(ary)+(n)); \
+    } \
+    else { \
+        RARRAY(ary)->as.heap.len += (n); \
+    } \
+} while (0)
+
+#define ARY_CAPA(ary) (ARY_EMBED_P(ary) ? ary_embed_capa(ary) : \
+                       ARY_SHARED_ROOT_P(ary) ? RARRAY_LEN(ary) : ARY_HEAP_CAPA(ary))
+#define ARY_SET_CAPA_FORCE(ary, n) \
+    RARRAY(ary)->as.heap.aux.capa = (n);
+#define ARY_SET_CAPA(ary, n) do { \
+    RUBY_ASSERT(!ARY_EMBED_P(ary)); \
+    RUBY_ASSERT(!ARY_SHARED_P(ary)); \
+    RUBY_ASSERT(!OBJ_FROZEN(ary)); \
+    ARY_SET_CAPA_FORCE(ary, n); \
+} while (0)
+
+#define ARY_SHARED_ROOT_OCCUPIED(ary) (!OBJ_FROZEN(ary) && ARY_SHARED_ROOT_REFCNT(ary) == 1)
+#define ARY_SET_SHARED_ROOT_REFCNT(ary, value) do { \
+    RUBY_ASSERT(ARY_SHARED_ROOT_P(ary)); \
+    RUBY_ASSERT(!OBJ_FROZEN(ary)); \
+    RUBY_ASSERT((value) >= 0); \
+    RARRAY(ary)->as.heap.aux.capa = (value); \
+} while (0)
+#define FL_SET_SHARED_ROOT(ary) do { \
+    RUBY_ASSERT(!OBJ_FROZEN(ary)); \
+    RUBY_ASSERT(!ARY_EMBED_P(ary)); \
+    FL_SET((ary), RARRAY_SHARED_ROOT_FLAG); \
+} while (0)
+
+static inline void
+ARY_SET(VALUE a, long i, VALUE v)
+{
+    RUBY_ASSERT(!ARY_SHARED_P(a));
+    RUBY_ASSERT(!OBJ_FROZEN(a));
+
+    RARRAY_ASET(a, i, v);
+}
+#undef RARRAY_ASET
+
+static long
+ary_embed_capa(VALUE ary)
+{
+    size_t size = rb_gc_obj_slot_size(ary) - offsetof(struct RArray, as.ary);
+    RUBY_ASSERT(size % sizeof(VALUE) == 0);
+    return size / sizeof(VALUE);
+}
+
+static size_t
+ary_embed_size(long capa)
+{
+    size_t size = offsetof(struct RArray, as.ary) + (sizeof(VALUE) * capa);
+    if (size < sizeof(struct RArray)) size = sizeof(struct RArray);
+    return size;
+}

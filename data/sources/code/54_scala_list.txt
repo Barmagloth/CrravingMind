@@ -1,0 +1,200 @@
+/*
+ * Scala (https://www.scala-lang.org)
+ *
+ * Copyright EPFL and Lightbend, Inc. dba Akka
+ *
+ * Licensed under Apache License 2.0
+ * (http://www.apache.org/licenses/LICENSE-2.0).
+ *
+ * See the NOTICE file distributed with this work for
+ * additional information regarding copyright ownership.
+ */
+
+package scala
+package collection
+package immutable
+
+import scala.annotation.unchecked.uncheckedVariance
+import scala.annotation.tailrec
+import mutable.{Builder, ListBuffer}
+import scala.collection.generic.{CommonErrors, DefaultSerializable}
+import scala.runtime.Statics.releaseFence
+
+/** A class for immutable linked lists representing ordered collections
+ *  of elements of type `A`.
+ *
+ *  This class comes with two implementing case classes `scala.Nil`
+ *  and `scala.::` that implement the abstract members `isEmpty`,
+ *  `head` and `tail`.
+ *
+ *  This class is optimal for last-in-first-out (LIFO), stack-like access patterns. If you need another access
+ *  pattern, for example, random access or FIFO, consider using a collection more suited to this than `List`.
+ *
+ *  ==Performance==
+ *  '''Time:''' `List` has `O(1)` prepend and head/tail access. Most other operations are `O(n)` on the number of elements in the list.
+ *  This includes the index-based lookup of elements, `length`, `append` and `reverse`.
+ *
+ *  '''Space:''' `List` implements '''structural sharing''' of the tail list. This means that many operations are either
+ *  zero- or constant-memory cost.
+ *  {{{
+ *  val mainList = List(3, 2, 1)
+ *  val with4 =    4 :: mainList  // re-uses mainList, costs one :: instance
+ *  val with42 =   42 :: mainList // also re-uses mainList, cost one :: instance
+ *  val shorter =  mainList.tail  // costs nothing as it uses the same 2::1::Nil instances as mainList
+ *  }}}
+ *
+ *  @example {{{
+ *  // Make a list via the companion object factory
+ *  val days = List("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
+ *
+ *  // Make a list element-by-element
+ *  val when = "AM" :: "PM" :: Nil
+ *
+ *  // Pattern match
+ *  days match {
+ *    case firstDay :: otherDays =>
+ *      println("The first day of the week is: " + firstDay)
+ *    case Nil =>
+ *      println("There don't seem to be any week days.")
+ *  }
+ *  }}}
+ *
+ *  @note The functional list is characterized by persistence and structural sharing, thus offering considerable
+ *        performance and space consumption benefits in some scenarios if used correctly.
+ *        However, note that objects having multiple references into the same functional list (that is,
+ *        objects that rely on structural sharing), will be serialized and deserialized with multiple lists, one for
+ *        each reference to it. I.e. structural sharing is lost after serialization/deserialization.
+ *
+ *  @see  [[https://docs.scala-lang.org/overviews/collections-2.13/concrete-immutable-collection-classes.html#lists "Scala's Collection Library overview"]]
+ *  section on `Lists` for more information.
+ *
+ *  @define coll list
+ *  @define Coll `List`
+ *  @define orderDependent
+ *  @define orderDependentFold
+ *  @define mayNotTerminateInf
+ *  @define willNotTerminateInf
+ */
+@SerialVersionUID(3L)
+sealed abstract class List[+A]
+  extends AbstractSeq[A]
+    with LinearSeq[A]
+    with LinearSeqOps[A, List, List[A]]
+    with StrictOptimizedLinearSeqOps[A, List, List[A]]
+    with StrictOptimizedSeqOps[A, List, List[A]]
+    with IterableFactoryDefaults[A, List]
+    with DefaultSerializable {
+
+  override def iterableFactory: SeqFactory[List] = List
+
+  /** Adds an element at the beginning of this list.
+    *  @param elem the element to prepend.
+    *  @return  a list which contains `x` as first element and
+    *           which continues with this list.
+    *  Example:
+    *  {{{1 :: List(2, 3) = List(2, 3).::(1) = List(1, 2, 3)}}}
+    */
+  def :: [B >: A](elem: B): List[B] =  new ::(elem, this)
+
+  /** Adds the elements of a given list in front of this list.
+    *
+    * Example:
+    * {{{List(1, 2) ::: List(3, 4) = List(3, 4).:::(List(1, 2)) = List(1, 2, 3, 4)}}}
+    *
+    *  @param prefix  The list elements to prepend.
+    *  @return a list resulting from the concatenation of the given
+    *    list `prefix` and this list.
+    */
+  def ::: [B >: A](prefix: List[B]): List[B] =
+    if (isEmpty) prefix
+    else if (prefix.isEmpty) this
+    else {
+      val result = new ::[B](prefix.head, this)
+      var curr = result
+      var that = prefix.tail
+      while (!that.isEmpty) {
+        val temp = new ::[B](that.head, this)
+        curr.next = temp
+        curr = temp
+        that = that.tail
+      }
+      releaseFence()
+      result
+    }
+
+  /** Adds the elements of a given list in reverse order in front of this list.
+    *  `xs reverse_::: ys` is equivalent to
+    *  `xs.reverse ::: ys` but is more efficient.
+    *
+    *  @param prefix the prefix to reverse and then prepend
+    *  @return       the concatenation of the reversed prefix and the current list.
+    */
+  def reverse_:::[B >: A](prefix: List[B]): List[B] = {
+    var these: List[B] = this
+    var pres = prefix
+    while (!pres.isEmpty) {
+      these = pres.head :: these
+      pres = pres.tail
+    }
+    these
+  }
+
+  override final def isEmpty: Boolean = this eq Nil
+
+  override def prepended[B >: A](elem: B): List[B] = elem :: this
+
+  override def prependedAll[B >: A](prefix: collection.IterableOnce[B]): List[B] = prefix match {
+    case xs: List[B] => xs ::: this
+    case _ if prefix.knownSize == 0 => this
+    case b: ListBuffer[B] if this.isEmpty => b.toList
+    case _ =>
+      val iter = prefix.iterator
+      if (iter.hasNext) {
+        val result = new ::[B](iter.next(), this)
+        var curr = result
+        while (iter.hasNext) {
+          val temp = new ::[B](iter.next(), this)
+          curr.next = temp
+          curr = temp
+        }
+        releaseFence()
+        result
+      } else {
+        this
+      }
+  }
+
+  // When calling appendAll with another list `suffix`, avoid copying `suffix`
+  override def appendedAll[B >: A](suffix: collection.IterableOnce[B]): List[B] = suffix match {
+    case xs: List[B] => this ::: xs
+    case _ => super.appendedAll(suffix)
+  }
+
+  override def take(n: Int): List[A] = if (isEmpty || n <= 0) Nil else {
+    val h = new ::(head, Nil)
+    var t = h
+    var rest = tail
+    var i = 1
+    while ({if (rest.isEmpty) return this; i < n}) {
+      i += 1
+      val nx = new ::(rest.head, Nil)
+      t.next = nx
+      t = nx
+      rest = rest.tail
+    }
+    releaseFence()
+    h
+  }
+
+  override def slice(from: Int, until: Int): List[A] = {
+    val lo = scala.math.max(from, 0)
+    if (until <= lo || isEmpty) Nil
+    else this drop lo take (until - lo)
+  }
+
+  override def takeRight(n: Int): List[A] = {
+    @tailrec
+    def loop(lead: List[A], lag: List[A]): List[A] = lead match {
+      case Nil => lag
+      case _ :: tail => loop(tail, lag.tail)
+    }
