@@ -84,7 +84,7 @@ judge:
 
   # NER model
   entities:
-    model_name: "en_core_web_sm"
+    model_name: "en_core_web_lg"
 
   # LLM for benchmark QA (deterministic)
   llm:

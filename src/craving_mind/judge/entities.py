@@ -8,7 +8,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_MODEL = "en_core_web_sm"
+_DEFAULT_MODEL = "en_core_web_lg"
 
 
 class EntityExtractor:
