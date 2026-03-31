@@ -247,18 +247,39 @@ class CLIProvider(LLMProvider):
         collected_text: list[str] = []
         usage_data: dict = {}
 
+        MAX_RETRIES = 5
+        INITIAL_BACKOFF = 2.0
+
         async def _run() -> None:
+            import logging
             nonlocal usage_data
-            async for msg in _query(prompt=prompt, options=options):
-                if _AssistantMessage and isinstance(msg, _AssistantMessage):
-                    for block in msg.content:
-                        if _TextBlock and isinstance(block, _TextBlock):
-                            collected_text.append(block.text)
-                elif _ResultMessage and isinstance(msg, _ResultMessage):
-                    if msg.usage:
-                        usage_data = msg.usage
-                    if msg.session_id:
-                        self._session_id = msg.session_id
+            for attempt in range(MAX_RETRIES):
+                collected_text.clear()
+                usage_data.clear()
+                try:
+                    async for msg in _query(prompt=prompt, options=options):
+                        if _AssistantMessage and isinstance(msg, _AssistantMessage):
+                            for block in msg.content:
+                                if _TextBlock and isinstance(block, _TextBlock):
+                                    collected_text.append(block.text)
+                        elif _ResultMessage and isinstance(msg, _ResultMessage):
+                            if msg.usage:
+                                usage_data = msg.usage
+                            if msg.session_id:
+                                self._session_id = msg.session_id
+                    break  # success
+                except Exception as e:
+                    error_str = str(e).lower()
+                    if "rate_limit" in error_str or "unknown message type" in error_str:
+                        wait = INITIAL_BACKOFF * (2 ** attempt)
+                        logging.getLogger("craving_mind").warning(
+                            f"Rate limited (attempt {attempt + 1}/{MAX_RETRIES}), waiting {wait}s..."
+                        )
+                        await asyncio.sleep(wait)
+                        if attempt == MAX_RETRIES - 1:
+                            raise
+                    else:
+                        raise
 
         for attempt in range(MAX_RETRIES):
             collected_text.clear()
