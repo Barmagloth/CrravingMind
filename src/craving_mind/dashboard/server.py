@@ -303,18 +303,38 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   #console-body {
     flex: 1;
     overflow-y: auto;
+    overflow-x: auto;
     padding: 6px 8px;
     font-family: var(--mono);
     font-size: 11px;
     line-height: 1.6;
+    white-space: pre;
   }
   .cl-pass  { color: #16c79a; }
   .cl-fail  { color: #e94560; }
   .cl-warn  { color: #f7b731; }
   .cl-info  { color: #6b8fa8; }
   .cl-epoch { color: #c084fc; font-weight: 700; }
-  .cl-line  { padding: 1px 2px; border-radius: 2px; white-space: pre; }
+  .cl-tool  { color: #3d6a78; padding-left: 4px; }
+  .cl-crav  { color: #5a5a82; font-style: italic; padding-left: 4px; cursor: pointer; }
+  .cl-judge { color: #5a6a7a; padding-left: 4px; }
+  .crav-toggle { color: #4a90d9; font-style: normal; user-select: none; font-size: 10px; margin-left: 4px; }
+  .cl-line  { padding: 1px 2px; border-radius: 2px; }
   .cl-line:hover { background: rgba(255,255,255,0.04); }
+
+  /* ---- Console drag handle ---- */
+  #console-drag-handle {
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 5px;
+    cursor: col-resize;
+    z-index: 2;
+  }
+  #console-drag-handle:hover, #console-drag-handle.dragging {
+    background: var(--border);
+  }
 </style>
 </head>
 <body>
@@ -536,12 +556,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
 <!-- LIVE CONSOLE PANEL (fixed, far right, collapsible) -->
 <div id="console-panel">
-  <button id="console-toggle-btn" onclick="consoleToggle()" title="Toggle Live Console">◀</button>
+  <div id="console-drag-handle" title="Drag to resize"></div>
+  <button id="console-toggle-btn" onclick="consoleToggle()" title="Collapse Live Console">▶</button>
   <div id="console-header">
     <div class="panel-title">Live Console</div>
     <label class="console-autoscroll-label" title="Auto-scroll to newest lines">
       <input type="checkbox" id="console-autoscroll" checked>
       Auto-scroll
+    </label>
+    <label class="console-autoscroll-label" title="Wrap long lines">
+      <input type="checkbox" id="console-wrap">
+      Wrap
     </label>
     <button id="console-clear-btn" onclick="consoleClear()">Clear</button>
   </div>
@@ -808,6 +833,7 @@ function clearLog() { logEntries = []; seenEpochs = new Set(); renderLog(); }
 // ============================================================
 let consoleCollapsed = false;
 let consoleLines = [];
+let consoleWidth = 480;
 
 function consoleToggle() {
   consoleCollapsed = !consoleCollapsed;
@@ -815,11 +841,12 @@ function consoleToggle() {
   const btn = document.getElementById('console-toggle-btn');
   if (consoleCollapsed) {
     panel.classList.add('collapsed');
-    btn.textContent = '▶';
+    btn.textContent = '◀';
     btn.title = 'Expand Live Console';
   } else {
     panel.classList.remove('collapsed');
-    btn.textContent = '◀';
+    panel.style.width = consoleWidth + 'px';
+    btn.textContent = '▶';
     btn.title = 'Collapse Live Console';
   }
 }
@@ -830,11 +857,45 @@ function consoleClear() {
 }
 
 function consoleColorClass(line) {
+  if (line.startsWith('  \u2192 ')) return 'cl-tool';
+  if (line.startsWith('  Crav:')) return 'cl-crav';
+  if (line.startsWith('  Judge:')) {
+    if (/ PASS/.test(line)) return 'cl-pass';
+    if (/ FAIL/.test(line)) return 'cl-fail';
+    return 'cl-judge';
+  }
   if (/ PASS/.test(line)) return 'cl-pass';
   if (/ FAIL/.test(line)) return 'cl-fail';
   if (/\[E\d+\] Complete:/.test(line) || /Complete:/.test(line)) return 'cl-epoch';
   if (/OOM|WARNING|WARN/.test(line)) return 'cl-warn';
   return 'cl-info';
+}
+
+function renderConsoleLine(line) {
+  const cls = consoleColorClass(line);
+  // Crav text lines: click-to-expand (first 100 chars collapsed)
+  const CRAV_PREFIX = '  Crav: "';
+  if (line.startsWith(CRAV_PREFIX)) {
+    const inner = line.slice(CRAV_PREFIX.length, line.endsWith('"') ? -1 : undefined);
+    if (inner.length > 100) {
+      const short = escHtml(inner.slice(0, 100));
+      const full  = escHtml(inner);
+      return `<div class="cl-line cl-crav" onclick="cravToggle(this)">`
+        + `<span class="crav-short">  Crav: &ldquo;${short}&hellip;<span class="crav-toggle">[+]</span>&rdquo;</span>`
+        + `<span class="crav-full" style="display:none">  Crav: &ldquo;${full}&rdquo;</span>`
+        + `</div>`;
+    }
+    return `<div class="cl-line cl-crav">  Crav: &ldquo;${escHtml(inner)}&rdquo;</div>`;
+  }
+  return `<div class="cl-line ${cls}">${escHtml(line)}</div>`;
+}
+
+function cravToggle(el) {
+  const short = el.querySelector('.crav-short');
+  const full  = el.querySelector('.crav-full');
+  const expanded = full.style.display !== 'none';
+  full.style.display  = expanded ? 'none' : '';
+  short.style.display = expanded ? '' : 'none';
 }
 
 function consoleUpdate(lines) {
@@ -843,15 +904,55 @@ function consoleUpdate(lines) {
   if (lines.length === consoleLines.length) return;
   consoleLines = lines;
   const body = document.getElementById('console-body');
-  body.innerHTML = lines.map(l => {
-    const cls = consoleColorClass(l);
-    return `<div class="cl-line ${cls}">${escHtml(l)}</div>`;
-  }).join('');
+  body.innerHTML = lines.map(renderConsoleLine).join('');
   const autoScroll = document.getElementById('console-autoscroll');
   if (autoScroll && autoScroll.checked) {
     body.scrollTop = body.scrollHeight;
   }
 }
+
+// ---- Console resize (drag left border) ----
+(function() {
+  const handle = document.getElementById('console-drag-handle');
+  handle.addEventListener('mousedown', function(e) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startWidth = consoleWidth;
+    handle.classList.add('dragging');
+    document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'col-resize';
+
+    function onMove(e) {
+      const delta = startX - e.clientX;
+      const newWidth = Math.max(200, Math.min(window.innerWidth * 0.8, startWidth + delta));
+      consoleWidth = newWidth;
+      document.getElementById('console-panel').style.width = newWidth + 'px';
+    }
+    function onUp() {
+      handle.classList.remove('dragging');
+      document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+    }
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+})();
+
+// ---- Console wrap toggle ----
+document.getElementById('console-wrap').addEventListener('change', function() {
+  const body = document.getElementById('console-body');
+  if (this.checked) {
+    body.style.whiteSpace = 'pre-wrap';
+    body.style.wordBreak = 'break-word';
+    body.style.overflowX = 'hidden';
+  } else {
+    body.style.whiteSpace = 'pre';
+    body.style.wordBreak = '';
+    body.style.overflowX = 'auto';
+  }
+});
 
 // ============================================================
 // File Viewer

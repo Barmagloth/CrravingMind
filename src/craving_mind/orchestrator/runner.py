@@ -206,8 +206,53 @@ class EpochRunner:
             "tasks_total": tasks_total,
             "task_id": task_id,
             "target_ratio": target_ratio,
+            "tool_calls": self._format_tool_calls_log(turn_result),
+            "crav_text": (turn_result.get("content") or "")[:1000],
         }
         return task_result
+
+    def _format_tool_calls_log(self, turn_result: dict) -> list[dict]:
+        """Summarise tool calls from a turn result for task_log storage."""
+        tc_by_id = {tc["id"]: tc for tc in turn_result.get("tool_calls", [])}
+        logged: list[dict] = []
+        for tr in turn_result.get("tool_results", []):
+            name = tr["name"]
+            tc = tc_by_id.get(tr.get("tool_call_id", ""), {})
+            raw_args = tc.get("arguments", {})
+            result = tr["result"]
+
+            if name == "write_file":
+                args = {"filename": raw_args.get("filename", "?")}
+            elif name == "run_compress":
+                args = {
+                    "text_len": len(raw_args.get("text", "")),
+                    "ratio": raw_args.get("target_ratio"),
+                }
+            elif name == "read_file":
+                args = {"filename": raw_args.get("filename", "?")}
+            elif name == "run_script":
+                code = raw_args.get("code", "")
+                args = {"code": (code[:40] + "…") if len(code) > 40 else code}
+            else:
+                args = {}
+
+            if isinstance(result, dict):
+                if not result.get("success", True) or result.get("error"):
+                    err = result.get("error") or "error"
+                    result_str = f"FAIL: {err[:100]}"
+                elif name == "run_compress":
+                    output = result.get("output", "")
+                    result_str = f"success ({len(output)} chars)"
+                elif name == "write_file":
+                    smoke = result.get("smoke_test", "")
+                    result_str = "success" + (f" smoke={smoke}" if smoke else "")
+                else:
+                    result_str = "success"
+            else:
+                result_str = str(result)[:100]
+
+            logged.append({"name": name, "args": args, "result": result_str})
+        return logged
 
     # ------------------------------------------------------------------
     # Epoch finalisation
