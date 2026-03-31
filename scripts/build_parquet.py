@@ -328,16 +328,22 @@ def main(argv: list[str] | None = None) -> int:
     if completed:
         print(f"Resuming from checkpoint: {len(completed)}/{total} already done.\n")
 
-    # Determine LLM mode
+    # Determine LLM mode.
+    # Fall back to mock only when BOTH the SDK key is absent AND the CLI is
+    # known-broken (e.g. nested Claude Code session).  By default the CLI is
+    # not disabled, so a plain terminal run without ANTHROPIC_API_KEY will
+    # still attempt the claude CLI subprocess.
     has_api_key = bool(os.environ.get("ANTHROPIC_API_KEY"))
-    use_mock = args.mock or (not has_api_key)
+    cli_disabled: bool = _ask_claude_cli._disabled  # type: ignore[attr-defined]
+    use_mock = args.mock or (not has_api_key and cli_disabled)
 
+    rng = random.Random(42)
     if use_mock:
         print("[mode] MockBenchmarkGenerator (no real LLM calls)\n")
-        rng = random.Random(42)
+    elif has_api_key:
+        print("[mode] Anthropic SDK  model=claude-haiku-4-5-20251001\n")
     else:
-        print(f"[mode] Anthropic SDK  model=claude-haiku-4-5-20251001\n")
-        rng = random.Random(42)  # only used as fallback
+        print("[mode] claude CLI subprocess\n")
 
     # Process each source text
     for idx, rec in enumerate(source_records, start=1):
