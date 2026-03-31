@@ -5,7 +5,6 @@ import json
 import logging
 import os
 import re
-import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
@@ -242,16 +241,12 @@ class CLIProvider(LLMProvider):
         )
 
         MAX_RETRIES = 5
-        INITIAL_BACKOFF = 10  # seconds
+        INITIAL_BACKOFF = 2.0
 
         collected_text: list[str] = []
         usage_data: dict = {}
 
-        MAX_RETRIES = 5
-        INITIAL_BACKOFF = 2.0
-
         async def _run() -> None:
-            import logging
             nonlocal usage_data
             for attempt in range(MAX_RETRIES):
                 collected_text.clear()
@@ -272,8 +267,9 @@ class CLIProvider(LLMProvider):
                     error_str = str(e).lower()
                     if "rate_limit" in error_str or "unknown message type" in error_str:
                         wait = INITIAL_BACKOFF * (2 ** attempt)
-                        logging.getLogger("craving_mind").warning(
-                            f"Rate limited (attempt {attempt + 1}/{MAX_RETRIES}), waiting {wait}s..."
+                        logger.warning(
+                            "Rate limited (attempt %d/%d), waiting %.1fs: %s",
+                            attempt + 1, MAX_RETRIES, wait, e,
                         )
                         await asyncio.sleep(wait)
                         if attempt == MAX_RETRIES - 1:
@@ -281,26 +277,7 @@ class CLIProvider(LLMProvider):
                     else:
                         raise
 
-        for attempt in range(MAX_RETRIES):
-            collected_text.clear()
-            usage_data.clear()
-            try:
-                asyncio.run(_run())
-                break
-            except Exception as e:
-                is_rate_limit = (
-                    "rate_limit" in str(e).lower()
-                    or "MessageParseError" in type(e).__name__
-                )
-                if is_rate_limit and attempt < MAX_RETRIES - 1:
-                    wait = INITIAL_BACKOFF * (2 ** attempt)
-                    logger.warning(
-                        "Rate limited (attempt %d/%d), waiting %ds: %s",
-                        attempt + 1, MAX_RETRIES, wait, e,
-                    )
-                    time.sleep(wait)
-                else:
-                    raise
+        asyncio.run(_run())
 
         raw_text = "".join(collected_text)
         content, tool_calls = self._parse_response(raw_text)
