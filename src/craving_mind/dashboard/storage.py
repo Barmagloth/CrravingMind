@@ -74,6 +74,33 @@ class MetricsStorage:
             return None
         return max(history, key=lambda e: e.get("epoch", -1))
 
+    def get_console_lines(self, limit: int = 200) -> list[str]:
+        """Read task_log.jsonl and format each entry as a human-readable log line."""
+        path = os.path.join(self.run_dir, "task_log.jsonl")
+        entries = self._read_jsonl(path)
+        lines: list[str] = []
+        for e in entries[-limit:]:
+            epoch = e.get("epoch", "?")
+            task_idx = e.get("task_idx", "?")
+            tasks_total = e.get("tasks_total", "?")
+            task_id = e.get("task_id", "")
+            hidden_type = e.get("hidden_type", "")
+            target_ratio = e.get("target_ratio")
+            sem = e.get("semantic_score")
+            ent = e.get("entity_score")
+            toks = e.get("tokens_spent")
+            passed = e.get("passed")
+            prefix = f"[E{epoch}][T{task_idx}/{tasks_total}]"
+            label = f"{hidden_type}/{task_id}" if hidden_type and task_id else task_id or hidden_type
+            ratio_str = f" ratio={target_ratio:.2f}" if target_ratio is not None else ""
+            toks_str = f" ({toks} tok)" if toks is not None else ""
+            verdict = "PASS" if passed else "FAIL"
+            sem_str = f"sem={sem:.2f}" if sem is not None else "sem=?"
+            ent_str = f"ent={ent:.2f}" if ent is not None else "ent=?"
+            line = f"{prefix} {label}{ratio_str}{toks_str}  Judge: {sem_str} {ent_str} {verdict}"
+            lines.append(line)
+        return lines
+
     def get_live_state(self) -> dict | None:
         """Read live_state.json written by the runner per-task."""
         path = os.path.join(self.run_dir, "live_state.json")

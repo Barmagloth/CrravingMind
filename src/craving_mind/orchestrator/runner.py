@@ -202,6 +202,10 @@ class EpochRunner:
             "semantic_score": eval_result["semantic_score"],
             "entity_score": eval_result["entity_score"],
             "tokens_spent": turn_result["tokens_spent"],
+            "task_idx": task_idx + 1,
+            "tasks_total": tasks_total,
+            "task_id": task_id,
+            "target_ratio": target_ratio,
         }
         return task_result
 

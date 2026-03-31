@@ -33,6 +33,7 @@ class MetricsCollector:
             "artifact": self._artifact_metrics(artifact_history, epoch_history),
             "live": self._live_metrics(epoch_history, checkpoint, live_state),
             "epoch_history": self._epoch_history_for_charts(epoch_history),
+            "console_lines": self.storage.get_console_lines(limit=200),
         }
 
     # ------------------------------------------------------------------

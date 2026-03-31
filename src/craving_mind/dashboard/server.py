@@ -76,6 +76,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     grid-template-rows: auto auto;
     gap: 10px;
     padding: 10px;
+    padding-right: 10px;
+    transition: padding-right 0.3s ease;
   }
 
   /* ---- Panels ---- */
@@ -218,6 +220,101 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   @media (max-width: 1100px) {
     #main { grid-template-columns: 200px 1fr 200px; }
   }
+
+  /* ---- Live Console Panel (fixed, right edge) ---- */
+  #console-panel {
+    position: fixed;
+    top: 44px;
+    right: 0;
+    bottom: 0;
+    width: 480px;
+    z-index: 60;
+    background: #0b0b18;
+    border-left: 2px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    transition: transform 0.3s ease;
+    box-shadow: -4px 0 20px rgba(0,0,0,0.5);
+  }
+  #console-panel.collapsed {
+    transform: translateX(100%);
+  }
+  #console-toggle-btn {
+    position: absolute;
+    left: -28px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 28px;
+    height: 56px;
+    background: #1a1a3e;
+    border: 1px solid var(--border);
+    border-right: none;
+    border-radius: 6px 0 0 6px;
+    color: var(--text2);
+    cursor: pointer;
+    font-size: 14px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    writing-mode: vertical-rl;
+    letter-spacing: 1px;
+    font-weight: 700;
+    transition: background 0.2s, color 0.2s;
+  }
+  #console-toggle-btn:hover { background: var(--bg3); color: var(--text); }
+  #console-header {
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
+    background: var(--bg2);
+  }
+  #console-header .panel-title {
+    margin-bottom: 0;
+    flex: 1;
+  }
+  #console-header .panel-title::after { display: none; }
+  .console-autoscroll-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    color: var(--muted);
+    cursor: pointer;
+    white-space: nowrap;
+    user-select: none;
+  }
+  .console-autoscroll-label input[type=checkbox] {
+    accent-color: var(--success);
+    cursor: pointer;
+  }
+  #console-clear-btn {
+    background: none;
+    border: 1px solid var(--border);
+    color: var(--muted);
+    padding: 1px 8px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 10px;
+  }
+  #console-clear-btn:hover { color: var(--text); border-color: var(--muted); }
+  #console-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 6px 8px;
+    font-family: var(--mono);
+    font-size: 11px;
+    line-height: 1.6;
+  }
+  .cl-pass  { color: #16c79a; }
+  .cl-fail  { color: #e94560; }
+  .cl-warn  { color: #f7b731; }
+  .cl-info  { color: #6b8fa8; }
+  .cl-epoch { color: #c084fc; font-weight: 700; }
+  .cl-line  { padding: 1px 2px; border-radius: 2px; white-space: pre; }
+  .cl-line:hover { background: rgba(255,255,255,0.04); }
 </style>
 </head>
 <body>
@@ -437,6 +534,20 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
 </div><!-- /main -->
 
+<!-- LIVE CONSOLE PANEL (fixed, far right, collapsible) -->
+<div id="console-panel">
+  <button id="console-toggle-btn" onclick="consoleToggle()" title="Toggle Live Console">◀</button>
+  <div id="console-header">
+    <div class="panel-title">Live Console</div>
+    <label class="console-autoscroll-label" title="Auto-scroll to newest lines">
+      <input type="checkbox" id="console-autoscroll" checked>
+      Auto-scroll
+    </label>
+    <button id="console-clear-btn" onclick="consoleClear()">Clear</button>
+  </div>
+  <div id="console-body"></div>
+</div>
+
 <script>
 // ============================================================
 // WebSocket
@@ -570,6 +681,9 @@ function render(s) {
 
   // Log new epochs
   logNewEpochs(hist);
+
+  // Live console
+  consoleUpdate(s.console_lines || []);
 }
 
 // ============================================================
@@ -688,6 +802,56 @@ function renderLog() {
 }
 
 function clearLog() { logEntries = []; seenEpochs = new Set(); renderLog(); }
+
+// ============================================================
+// Live Console
+// ============================================================
+let consoleCollapsed = false;
+let consoleLines = [];
+
+function consoleToggle() {
+  consoleCollapsed = !consoleCollapsed;
+  const panel = document.getElementById('console-panel');
+  const btn = document.getElementById('console-toggle-btn');
+  if (consoleCollapsed) {
+    panel.classList.add('collapsed');
+    btn.textContent = '▶';
+    btn.title = 'Expand Live Console';
+  } else {
+    panel.classList.remove('collapsed');
+    btn.textContent = '◀';
+    btn.title = 'Collapse Live Console';
+  }
+}
+
+function consoleClear() {
+  consoleLines = [];
+  document.getElementById('console-body').innerHTML = '';
+}
+
+function consoleColorClass(line) {
+  if (/ PASS/.test(line)) return 'cl-pass';
+  if (/ FAIL/.test(line)) return 'cl-fail';
+  if (/\[E\d+\] Complete:/.test(line) || /Complete:/.test(line)) return 'cl-epoch';
+  if (/OOM|WARNING|WARN/.test(line)) return 'cl-warn';
+  return 'cl-info';
+}
+
+function consoleUpdate(lines) {
+  if (!lines || !lines.length) return;
+  // If line count changed, rebuild; otherwise no-op for same lines
+  if (lines.length === consoleLines.length) return;
+  consoleLines = lines;
+  const body = document.getElementById('console-body');
+  body.innerHTML = lines.map(l => {
+    const cls = consoleColorClass(l);
+    return `<div class="cl-line ${cls}">${escHtml(l)}</div>`;
+  }).join('');
+  const autoScroll = document.getElementById('console-autoscroll');
+  if (autoScroll && autoScroll.checked) {
+    body.scrollTop = body.scrollHeight;
+  }
+}
 
 // ============================================================
 // File Viewer
@@ -964,6 +1128,10 @@ class DashboardServer:
                     await asyncio.sleep(interval)
             except WebSocketDisconnect:
                 pass
+
+        @app.get("/api/console")
+        async def console_lines():
+            return JSONResponse(self.storage.get_console_lines(limit=200))
 
         @app.get("/api/epochs")
         async def epochs():
