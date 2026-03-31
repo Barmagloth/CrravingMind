@@ -229,6 +229,10 @@ class CLIProvider(LLMProvider):
             )
 
         prompt = self._build_prompt(messages, tools, system)
+        logger.debug(
+            "CLIProvider.chat: prompt_len=%d max_tokens=%d session_id=%s",
+            len(prompt), max_tokens, self._session_id,
+        )
 
         # Remove CLAUDECODE so we can run nested from within a Claude Code session.
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
@@ -252,35 +256,54 @@ class CLIProvider(LLMProvider):
                 collected_text.clear()
                 usage_data.clear()
                 try:
+                    logger.debug(
+                        "CLIProvider: attempt %d/%d, prompt_len=%d",
+                        attempt + 1, MAX_RETRIES, len(prompt),
+                    )
                     async for msg in _query(prompt=prompt, options=options):
                         if _AssistantMessage and isinstance(msg, _AssistantMessage):
                             for block in msg.content:
                                 if _TextBlock and isinstance(block, _TextBlock):
                                     collected_text.append(block.text)
+                                    logger.debug(
+                                        "CLIProvider: text chunk %d chars", len(block.text)
+                                    )
                         elif _ResultMessage and isinstance(msg, _ResultMessage):
                             if msg.usage:
-                                usage_data = msg.usage
+                                usage_data.update(msg.usage if isinstance(msg.usage, dict)
+                                                  else vars(msg.usage))
                             if msg.session_id:
                                 self._session_id = msg.session_id
-                    break  # success
+                    logger.debug(
+                        "CLIProvider: success, total_chars=%d", sum(len(t) for t in collected_text)
+                    )
+                    return  # success — exit retry loop
                 except Exception as e:
                     error_str = str(e).lower()
                     if "rate_limit" in error_str or "unknown message type" in error_str:
                         wait = INITIAL_BACKOFF * (2 ** attempt)
                         logger.warning(
-                            "Rate limited (attempt %d/%d), waiting %.1fs: %s",
+                            "CLIProvider: rate-limited (attempt %d/%d), waiting %.1fs: %s",
                             attempt + 1, MAX_RETRIES, wait, e,
                         )
                         await asyncio.sleep(wait)
                         if attempt == MAX_RETRIES - 1:
+                            logger.error(
+                                "CLIProvider: all %d retries exhausted: %s", MAX_RETRIES, e
+                            )
                             raise
                     else:
+                        logger.error("CLIProvider: non-retryable error: %s", e)
                         raise
 
         asyncio.run(_run())
 
         raw_text = "".join(collected_text)
         content, tool_calls = self._parse_response(raw_text)
+        logger.debug(
+            "CLIProvider: parsed content_len=%d tool_calls=%d",
+            len(content), len(tool_calls),
+        )
 
         # Estimate token usage from text length if SDK didn't report it.
         input_tokens = usage_data.get("input_tokens") or max(1, len(prompt) // 4)
