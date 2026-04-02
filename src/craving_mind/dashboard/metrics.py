@@ -222,6 +222,8 @@ class MetricsCollector:
                 "success_rate": round(e.get("success_rate", 0.0), 4),
                 "frozen_success_rate": round(e.get("frozen_success_rate", 0.0), 4),
                 "dynamic_success_rate": round(e.get("dynamic_success_rate", 0.0), 4),
+                "semantic_score": round(e.get("semantic_score", 0.0), 4),
+                "entity_score": round(e.get("entity_score", 0.0), 4),
                 "overfit_gap": round(e.get("overfit_gap", 0.0), 4),
                 "saved_tokens": e.get("saved_tokens", 0),
                 "is_oom": e.get("is_oom", False),

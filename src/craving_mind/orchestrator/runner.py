@@ -365,12 +365,24 @@ class EpochRunner:
 
         starved_count = sum(1 for r in completed if r.get("starved"))
 
+        # Aggregate semantic / entity scores across completed tasks.
+        mean_sem = (
+            sum(r.get("semantic_score", 0.0) for r in completed) / len(completed)
+            if completed else 0.0
+        )
+        mean_ent = (
+            sum(r.get("entity_score", 0.0) for r in completed) / len(completed)
+            if completed else 0.0
+        )
+
         epoch_result = {
             "epoch": epoch,
             "success_rate": combined,
             "frozen_success_rate": frozen_sr,
             "dynamic_success_rate": dynamic_sr,
             "overfit_gap": overfit_gap,
+            "semantic_score": mean_sem,
+            "entity_score": mean_ent,
             "tasks_completed": len(completed),
             "tasks_total": len(results),
             "starved_tasks": starved_count,

@@ -768,11 +768,14 @@ function updateCharts(hist, art) {
   const overfit  = hist.map(e => e.overfit_gap);
   const tokens   = hist.map(e => e.saved_tokens);
 
+  const sem = hist.map(e => e.semantic_score ?? 0);
+  const ent = hist.map(e => e.entity_score ?? 0);
+
   // Artifact best score per epoch (sparse)
   const artBest = hist.map(e => e.artifact_path ? (art.best_mean_score ?? null) : null);
 
   setChartData(chartSR, labels, [frozenSR, dynSR]);
-  setChartData(chartScores, labels, [frozenSR, dynSR, artBest]); // reuse as proxy
+  setChartData(chartScores, labels, [sem, ent, artBest]);
   setChartData(chartOverfit, labels, [overfit]);
   setChartData(chartTokens, labels, [tokens]);
 }
