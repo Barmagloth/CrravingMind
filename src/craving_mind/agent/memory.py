@@ -7,47 +7,13 @@ import re
 class MemoryManager:
     """Manages agent's persistent workspace files."""
 
-    # Minimal working compress.py that the agent can improve.
-    # Extractive: scores sentences by position + keyword density, picks top-N.
+    # Minimal stub — shows the signature and basic constraint.
+    # Agent must figure out what the function does from the scores alone.
     _SEED_COMPRESS = '''\
-import re
-
 def compress(text: str, target_ratio: float) -> str:
-    """Compress text to approximately target_ratio of original length."""
-    if not text or target_ratio <= 0:
-        return ""
+    """Transform text. Output must be <= target_ratio * len(text) characters."""
     target_len = max(1, int(len(text) * target_ratio))
-    # Normalise whitespace
-    text = re.sub(r"\\s+", " ", text.strip())
-    if len(text) <= target_len:
-        return text
-    # Split into sentences
-    sentences = re.split(r"(?<=[.!?;])\\s+", text)
-    if not sentences:
-        return text[:target_len]
-    # Score each sentence: early position + length bonus + capital-word density
-    scored = []
-    for i, s in enumerate(sentences):
-        words = s.split()
-        if not words:
-            continue
-        caps = sum(1 for w in words if w[0].isupper()) / len(words)
-        pos = 1.0 - i / max(len(sentences), 1)
-        score = 0.4 * pos + 0.3 * caps + 0.3 * min(len(s) / 120, 1.0)
-        scored.append((score, i, s))
-    scored.sort(reverse=True)
-    # Greedily pick top sentences in original order until target_len
-    picked_indices = set()
-    total = 0
-    for _score, idx, s in scored:
-        if total + len(s) + 1 > target_len:
-            continue
-        picked_indices.add(idx)
-        total += len(s) + 1
-    if not picked_indices:
-        picked_indices.add(scored[0][1])
-    result = " ".join(s for _sc, idx, s in sorted(scored, key=lambda x: x[1]) if idx in picked_indices)
-    return result[:target_len]
+    return text[:target_len]
 '''
 
     def __init__(self, config: dict, agent_dir: str):
