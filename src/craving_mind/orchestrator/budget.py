@@ -79,6 +79,14 @@ class BudgetManager:
 
         return True
 
+    def refund(self, tokens: int) -> None:
+        """Return tokens to budget (e.g. free tool calls like graveyard reads)."""
+        self.remaining += tokens
+        self.total_spent = max(0, self.total_spent - tokens)
+        # Un-trip starvation if refund brought us back above threshold.
+        if self.remaining >= self.critical_starvation_pct * (self.total_spent + self.remaining):
+            self.is_critical_starvation = False
+
     def can_afford(self, estimated_tokens: int) -> bool:
         """Pre-check if we can afford this call."""
         return estimated_tokens <= self.remaining

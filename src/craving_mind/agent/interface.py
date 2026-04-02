@@ -705,6 +705,20 @@ class AgentInterface:
                 })
             self.conversation.append({"role": "user", "content": tool_result_contents})
 
+            # Free reads: if the only tool call this round was reading
+            # graveyard.md, refund the tokens — agent shouldn't pay to
+            # learn from past failures.
+            _FREE_READS = {"graveyard.md"}
+            is_free_round = all(
+                tc["name"] == "read_file"
+                and tc["arguments"].get("filename") in _FREE_READS
+                for tc in response.tool_calls
+            )
+            if is_free_round:
+                self.budget.refund(step_tokens)
+                total_tokens -= step_tokens
+                logger.debug("Free read round — refunded %d tokens", step_tokens)
+
             if not alive:
                 # Budget exhausted — stop looping.
                 break
