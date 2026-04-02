@@ -52,6 +52,10 @@ class EpochRunner:
         self.run_dir = run_dir
         self.artifact_manager = artifact_manager
         self.checkpoint = checkpoint
+        # Short run tag from directory name (e.g. "run_20260402T161537Z" → "R1615")
+        import re as _re
+        _m = _re.search(r"(\d{2})(\d{2})(\d{2})Z", os.path.basename(run_dir))
+        self._run_tag = f"R{_m.group(1)}{_m.group(2)}" if _m else "R0"
         self._prev_compress_code: str | None = None
         self._live_state_path = os.path.join(run_dir, "live_state.json")
 
@@ -70,8 +74,8 @@ class EpochRunner:
         """Run a single epoch. Returns epoch result dict."""
         phase = self.phase_manager.get_phase(epoch)
 
-        # Assign a unique name to this epoch's agent.
-        crav_name = f"Crav-{epoch + 1:03d}"
+        # Assign a unique name: run tag + epoch (e.g. "R1615-001").
+        crav_name = f"{self._run_tag}-{epoch + 1:03d}"
         self.agent.crav_id = crav_name
 
         # 1. Initialise budget with venture multiplier and R&D carry-over.
@@ -483,6 +487,7 @@ class EpochRunner:
         """Write live_state.json so the dashboard can show real-time budget/progress."""
         state = {
             "epoch": epoch,
+            "crav_id": getattr(self.agent, "crav_id", "Crav-???"),
             "budget_remaining": self.budget.remaining,
             "budget_initial": self.budget._initial_epoch_budget,
             "tasks_completed": tasks_completed,

@@ -253,13 +253,16 @@ class TestToolsRegistry:
     def test_execute_write_file_smoke_test_failed(self, mock_sandbox, memory, budget):
         mock_smoke = MagicMock()
         mock_smoke.run.return_value = (False, ["Sample 0: RuntimeError: boom"])
+        # Write a known-good version first so we can verify rollback.
+        memory.write_file("compress.py", "def compress(t, r): return t")
         registry = ToolsRegistry(mock_sandbox, memory, budget, smoke_test=mock_smoke)
         result = registry.execute(
             "write_file", {"filename": "compress.py", "content": "def compress(t, r): raise RuntimeError('boom')"}
         )
-        assert result["success"] is True  # file was saved but smoke failed
-        assert result.get("smoke_test") == "FAILED"
-        assert len(result["errors"]) > 0
+        assert result["success"] is False  # smoke failed → file NOT saved
+        assert "Smoke test FAILED" in result["error"]
+        # Original file preserved.
+        assert memory.read_file("compress.py") == "def compress(t, r): return t"
 
     def test_execute_write_non_compress_skips_validation(self, mock_sandbox, memory, budget):
         # validate_imports should NOT be called for bible.md

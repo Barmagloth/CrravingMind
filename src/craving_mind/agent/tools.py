@@ -97,21 +97,28 @@ class ToolsRegistry:
             content = arguments["content"]
 
             if filename == "compress.py":
+                # 1. Validate imports before writing.
                 ok, err = self.sandbox.validate_imports(content)
                 if not ok:
                     return {
                         "success": False,
-                        "error": f"Forbidden import in compress.py: {err}. Only pure Python + whitelist allowed.",
+                        "error": f"Forbidden import: {err}. File NOT saved.",
                     }
 
-            self.memory.write_file(filename, content)
+                # 2. Smoke test BEFORE writing — don't break what works.
+                if self.smoke is not None:
+                    passed, errors = self.smoke.run(content)
+                    if not passed:
+                        return {
+                            "success": False,
+                            "error": f"Smoke test FAILED — file NOT saved. Errors: {'; '.join(errors[:3])}",
+                        }
 
-            if filename == "compress.py" and self.smoke is not None:
-                passed, errors = self.smoke.run(content)
-                if not passed:
-                    return {"success": True, "smoke_test": "FAILED", "errors": errors}
+                # 3. All checks passed — safe to write.
+                self.memory.write_file(filename, content)
                 return {"success": True, "smoke_test": "PASSED"}
 
+            self.memory.write_file(filename, content)
             return {"success": True}
 
         elif tool_name == "run_script":

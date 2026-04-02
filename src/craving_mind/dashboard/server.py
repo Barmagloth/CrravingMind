@@ -624,7 +624,7 @@ function render(s) {
   document.getElementById('tb-sr').textContent = live.latest_success_rate != null ? live.latest_success_rate + '%' : '—';
   document.getElementById('tb-best').textContent = art.best_mean_score != null ? (art.best_mean_score*100).toFixed(1)+'%' : '—';
   document.getElementById('tb-ts').textContent = new Date().toLocaleTimeString();
-  document.getElementById('tb-crav-id').textContent = 'Crav-001';
+  document.getElementById('tb-crav-id').textContent = live.crav_id || 'Crav-???';
 
   const phase = live.phase || health.phase || 1;
   const phaseBadge = document.getElementById('tb-phase');

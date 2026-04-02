@@ -200,6 +200,8 @@ class MetricsCollector:
         tasks_completed = live_state.get("tasks_completed", 0) if live_state else None
         tasks_total = live_state.get("tasks_total", 0) if live_state else None
 
+        crav_id = live_state.get("crav_id") if live_state else None
+
         return {
             "current_epoch": current_epoch,
             "total_epochs": len(epoch_history),
@@ -209,6 +211,7 @@ class MetricsCollector:
             "phase": self._current_phase(epoch_history),
             "tasks_completed": tasks_completed,
             "tasks_total": tasks_total,
+            "crav_id": crav_id,
         }
 
     def _epoch_history_for_charts(self, epoch_history: list[dict]) -> list[dict]:
