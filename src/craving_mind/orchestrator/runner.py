@@ -391,55 +391,49 @@ class EpochRunner:
     # ------------------------------------------------------------------
 
     def _build_system_prompt(self, epoch: int, phase: int, crav_name: str = "Crav") -> str:
-        """Build Crav's system prompt based on current phase."""
-        phase_descriptions = {
-            1: "Phase 1 — Venture: Generous token budget for exploration and experimentation.",
-            2: "Phase 2 — Consolidation: Tighter budget. Refine your compress() algorithm.",
-            3: "Phase 3 — Survival: Critical budget. Every token counts.",
-        }
+        """Build Crav's system prompt from config/system_prompt.yaml template."""
+        import yaml
+
+        prompt_cfg = self._load_prompt_config()
+        template = prompt_cfg.get("template", "")
+        phase_descriptions = prompt_cfg.get("phase_descriptions", {})
 
         # Embed graveyard directly so agent doesn't waste a tool round reading it.
         graveyard = self.memory.read_file("graveyard.md").strip()
         graveyard_section = "## GRAVEYARD — previous agents\n"
         if graveyard:
-            graveyard_section += graveyard + "\n"
+            graveyard_section += graveyard
         else:
-            graveyard_section += "(no previous agents yet)\n"
+            graveyard_section += "(no previous agents yet)"
 
-        return (
-            f"You are {crav_name}, an LLM agent whose sole job is to optimize a text compression function.\n\n"
-            f"Epoch {epoch} | {phase_descriptions.get(phase, '')}\n\n"
-            "## HOW IT WORKS\n"
-            "You have a file compress.py with a function: compress(text, target_ratio) -> str.\n"
-            "The system automatically runs your compress.py on benchmark texts and scores the output.\n"
-            "You will receive ONLY the numerical metrics — you never see the source texts.\n"
-            "Your job: read the metrics, improve compress.py, repeat.\n\n"
-            "After each task you get: compression_ratio, semantic_score, entity_score, PASS/FAIL.\n"
-            "  - semantic_score: cosine similarity of QA answers (compressed vs original)\n"
-            "  - entity_score: named entity F1 (facts, names, numbers)\n"
-            "  - PASS requires both scores ≥ 0.85 AND ratio within target\n\n"
-            "## compress() RULES\n"
-            "Signature: def compress(text: str, target_ratio: float) -> str\n"
-            "MUST be pure Python — no LLM calls, no network, no API calls.\n"
-            "ALLOWED: re, math, collections, itertools, functools, string, unicodedata,\n"
-            "  json, heapq, pathlib, typing, dataclasses, abc, copy, os.path,\n"
-            "  numpy, sklearn, spacy, nltk\n"
-            "FORBIDDEN: anthropic, openai, requests, urllib, socket, subprocess, os\n\n"
-            "## TOOLS\n"
-            "- read_file(filename): Read compress.py or bible.md\n"
-            "- edit_file(old_string, new_string): Patch compress.py — CHEAP, send only the diff\n"
-            "- write_file(filename, content): Full file overwrite — EXPENSIVE, use only for new files\n"
-            "- run_script(code): Run a Python script in your workspace to test ideas\n"
-            "- run_compress(text, target_ratio): Test compress() on your own sample text\n"
-            "- audit_budget(): Check remaining token budget\n\n"
-            "IMPORTANT: To modify compress.py, use edit_file (sends only the changed part).\n"
-            "write_file sends the ENTIRE file content and wastes your budget.\n\n"
-            f"{graveyard_section}\n"
-            "Learn from their failures — don't repeat the same mistakes.\n\n"
-            "## BUDGET\n"
-            "Every token costs budget. When budget runs out you die (OOM).\n"
-            "Be efficient — read metrics, make targeted improvements, minimize chatter."
+        # Allowed imports from sandbox config.
+        allowed = self.config.get("sandbox", {}).get("allowed_imports", [])
+        allowed_imports = ", ".join(allowed) if allowed else "(none configured)"
+
+        return template.format(
+            crav_name=crav_name,
+            epoch=epoch,
+            phase_description=phase_descriptions.get(phase, ""),
+            allowed_imports=allowed_imports,
+            graveyard_section=graveyard_section,
         )
+
+    def _load_prompt_config(self) -> dict:
+        """Load system_prompt.yaml from config dir (cached after first load)."""
+        if not hasattr(self, "_prompt_cfg_cache"):
+            import yaml
+            config_path = os.path.join(
+                os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(
+                    os.path.abspath(__file__))))),
+                "config", "system_prompt.yaml",
+            )
+            try:
+                with open(config_path, "r", encoding="utf-8") as f:
+                    self._prompt_cfg_cache = yaml.safe_load(f) or {}
+            except OSError:
+                self.logger.warning("system_prompt.yaml not found at %s — using empty template", config_path)
+                self._prompt_cfg_cache = {"template": "You are {crav_name}. Epoch {epoch}.", "phase_descriptions": {}}
+        return self._prompt_cfg_cache
 
     def _write_epitaph(
         self, epoch: int, completed: list, all_results: list,
