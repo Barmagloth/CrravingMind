@@ -547,8 +547,9 @@ class AgentInterface:
             return ""
 
         msg = (
-            "Epoch over. Write ONE short line for the graveyard: "
-            "what approach you tried and why it failed. No tools, just text."
+            "Epoch over. Write ONE short line (max 200 chars) for the graveyard: "
+            "what you added/removed in compress.py this epoch and what effect it had. "
+            "No tools, just text."
         )
         self.conversation.append({"role": "user", "content": msg})
 
