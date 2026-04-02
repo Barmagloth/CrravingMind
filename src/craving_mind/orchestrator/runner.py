@@ -222,6 +222,7 @@ class EpochRunner:
                     },
                 )
 
+        starved = self.budget.is_critical_starvation
         task_result = {
             "task_score": eval_result["task_score"],
             "passed": eval_result["pass"],
@@ -231,12 +232,13 @@ class EpochRunner:
             "semantic_score": eval_result["semantic_score"],
             "entity_score": eval_result["entity_score"],
             "tokens_spent": tokens_spent,
+            "starved": starved,
             "task_idx": task_idx + 1,
             "tasks_total": tasks_total,
             "task_id": task_id,
             "target_ratio": target_ratio,
-            "tool_calls": self._format_tool_calls_log(turn_result) if not self.budget.is_critical_starvation else [],
-            "crav_text": (turn_result.get("content") or "")[:1000] if not self.budget.is_critical_starvation else "(starvation)",
+            "tool_calls": self._format_tool_calls_log(turn_result) if not starved else [],
+            "crav_text": (turn_result.get("content") or "")[:1000] if not starved else "(starvation)",
         }
         return task_result
 
@@ -350,6 +352,8 @@ class EpochRunner:
             epoch, completed, results, combined, artifact_path is not None,
         )
 
+        starved_count = sum(1 for r in completed if r.get("starved"))
+
         epoch_result = {
             "epoch": epoch,
             "success_rate": combined,
@@ -358,6 +362,7 @@ class EpochRunner:
             "overfit_gap": overfit_gap,
             "tasks_completed": len(completed),
             "tasks_total": len(results),
+            "starved_tasks": starved_count,
             "saved_tokens": self.budget.saved_tokens,
             "is_oom": self.budget.is_oom,
             "artifact_path": artifact_path,

@@ -53,8 +53,9 @@ class MetricsCollector:
         oom_epochs = [e for e in epoch_history if e.get("is_oom")]
         completed_tasks = sum(e.get("tasks_completed", 0) for e in epoch_history)
         total_tasks = sum(e.get("tasks_total", 0) for e in epoch_history)
+        starved_tasks = sum(e.get("starved_tasks", 0) for e in epoch_history)
         starvation_rate = (
-            0.0 if total_tasks == 0 else (total_tasks - completed_tasks) / max(total_tasks, 1)
+            0.0 if total_tasks == 0 else starved_tasks / max(total_tasks, 1)
         )
 
         # Budget remaining: prefer live_state (per-task granularity) over epoch log
