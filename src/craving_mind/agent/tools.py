@@ -41,7 +41,10 @@ class ToolsRegistry:
             },
             {
                 "name": "write_file",
-                "description": "Write content to a file in your workspace.",
+                "description": (
+                    "Overwrite a file with full content. "
+                    "EXPENSIVE — prefer edit_file for small changes to compress.py."
+                ),
                 "input_schema": {
                     "type": "object",
                     "properties": {
@@ -52,6 +55,21 @@ class ToolsRegistry:
                         "content": {"type": "string"},
                     },
                     "required": ["filename", "content"],
+                },
+            },
+            {
+                "name": "edit_file",
+                "description": (
+                    "Replace a substring in compress.py. CHEAP — send only the changed part. "
+                    "old_string must match exactly (including whitespace)."
+                ),
+                "input_schema": {
+                    "type": "object",
+                    "properties": {
+                        "old_string": {"type": "string", "description": "Exact text to find in compress.py"},
+                        "new_string": {"type": "string", "description": "Replacement text"},
+                    },
+                    "required": ["old_string", "new_string"],
                 },
             },
             {
@@ -120,6 +138,41 @@ class ToolsRegistry:
 
             self.memory.write_file(filename, content)
             return {"success": True}
+
+        elif tool_name == "edit_file":
+            old_str = arguments.get("old_string", "")
+            new_str = arguments.get("new_string", "")
+
+            current = self.memory.read_file("compress.py")
+            if not current:
+                return {"success": False, "error": "compress.py does not exist yet. Use write_file."}
+
+            count = current.count(old_str)
+            if count == 0:
+                return {"success": False, "error": "old_string not found in compress.py. Read it first."}
+            if count > 1:
+                return {
+                    "success": False,
+                    "error": f"old_string matches {count} locations — must be unique. Add more context.",
+                }
+
+            patched = current.replace(old_str, new_str, 1)
+
+            # Same validation as write_file: imports → smoke → save.
+            ok, err = self.sandbox.validate_imports(patched)
+            if not ok:
+                return {"success": False, "error": f"Forbidden import: {err}. Edit NOT applied."}
+
+            if self.smoke is not None:
+                passed, errors = self.smoke.run(patched)
+                if not passed:
+                    return {
+                        "success": False,
+                        "error": f"Smoke test FAILED — edit NOT applied. Errors: {'; '.join(errors[:3])}",
+                    }
+
+            self.memory.write_file("compress.py", patched)
+            return {"success": True, "smoke_test": "PASSED"}
 
         elif tool_name == "run_script":
             result = self.sandbox.run_script(arguments["code"], self.memory.agent_dir)

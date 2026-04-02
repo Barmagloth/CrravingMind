@@ -258,6 +258,13 @@ class EpochRunner:
 
             if name == "write_file":
                 args = {"filename": raw_args.get("filename", "?")}
+            elif name == "edit_file":
+                old = raw_args.get("old_string", "")
+                new = raw_args.get("new_string", "")
+                args = {
+                    "old": (old[:30] + "…") if len(old) > 30 else old,
+                    "new": (new[:30] + "…") if len(new) > 30 else new,
+                }
             elif name == "run_compress":
                 args = {
                     "text_len": len(raw_args.get("text", "")),
@@ -412,10 +419,13 @@ class EpochRunner:
             "FORBIDDEN: anthropic, openai, requests, urllib, socket, subprocess, os\n\n"
             "## TOOLS\n"
             "- read_file(filename): Read compress.py, bible.md, or graveyard.md\n"
-            "- write_file(filename, content): Write files (compress.py runs smoke test)\n"
+            "- edit_file(old_string, new_string): Patch compress.py — CHEAP, send only the diff\n"
+            "- write_file(filename, content): Full file overwrite — EXPENSIVE, use only for new files\n"
             "- run_script(code): Run a Python script in your workspace to test ideas\n"
             "- run_compress(text, target_ratio): Test compress() on your own sample text\n"
             "- audit_budget(): Check remaining token budget\n\n"
+            "IMPORTANT: To modify compress.py, use edit_file (sends only the changed part).\n"
+            "write_file sends the ENTIRE file content and wastes your budget.\n\n"
             "## GRAVEYARD\n"
             "Read graveyard.md to see what happened to previous agents.\n"
             "Learn from their failures — don't repeat the same mistakes.\n\n"

@@ -208,11 +208,11 @@ class TestToolsRegistry:
 
     def test_get_tool_definitions_returns_five(self, registry):
         tools = registry.get_tool_definitions()
-        assert len(tools) == 5
+        assert len(tools) == 6
 
     def test_tool_names(self, registry):
         names = {t["name"] for t in registry.get_tool_definitions()}
-        assert names == {"run_compress", "read_file", "write_file", "run_script", "audit_budget"}
+        assert names == {"run_compress", "read_file", "write_file", "edit_file", "run_script", "audit_budget"}
 
     def test_each_tool_has_input_schema(self, registry):
         for tool in registry.get_tool_definitions():
@@ -263,6 +263,68 @@ class TestToolsRegistry:
         assert "Smoke test FAILED" in result["error"]
         # Original file preserved.
         assert memory.read_file("compress.py") == "def compress(t, r): return t"
+
+    def test_execute_edit_file_success(self, mock_sandbox, memory, budget):
+        """edit_file replaces old_string with new_string in compress.py."""
+        mock_smoke = MagicMock()
+        mock_smoke.run.return_value = (True, [])
+        memory.write_file("compress.py", "def compress(t, r):\n    return t[:10]\n")
+        registry = ToolsRegistry(mock_sandbox, memory, budget, smoke_test=mock_smoke)
+        result = registry.execute("edit_file", {
+            "old_string": "return t[:10]",
+            "new_string": "return t[:int(len(t)*r)]",
+        })
+        assert result["success"] is True
+        assert "return t[:int(len(t)*r)]" in memory.read_file("compress.py")
+
+    def test_execute_edit_file_not_found(self, mock_sandbox, memory, budget):
+        """edit_file fails when old_string doesn't match."""
+        memory.write_file("compress.py", "def compress(t, r): return t")
+        registry = ToolsRegistry(mock_sandbox, memory, budget)
+        result = registry.execute("edit_file", {
+            "old_string": "NONEXISTENT",
+            "new_string": "replacement",
+        })
+        assert result["success"] is False
+        assert "not found" in result["error"]
+
+    def test_execute_edit_file_ambiguous(self, mock_sandbox, memory, budget):
+        """edit_file fails when old_string matches multiple locations."""
+        memory.write_file("compress.py", "x = 1\ny = 1\n")
+        registry = ToolsRegistry(mock_sandbox, memory, budget)
+        result = registry.execute("edit_file", {
+            "old_string": "1",
+            "new_string": "2",
+        })
+        assert result["success"] is False
+        assert "2 locations" in result["error"]
+
+    def test_execute_edit_file_smoke_fail(self, mock_sandbox, memory, budget):
+        """edit_file rolls back when smoke test fails."""
+        mock_smoke = MagicMock()
+        mock_smoke.run.return_value = (False, ["RuntimeError: bad"])
+        memory.write_file("compress.py", "def compress(t, r): return t")
+        registry = ToolsRegistry(mock_sandbox, memory, budget, smoke_test=mock_smoke)
+        result = registry.execute("edit_file", {
+            "old_string": "return t",
+            "new_string": "return 42",
+        })
+        assert result["success"] is False
+        assert "Smoke test FAILED" in result["error"]
+        # Original file preserved.
+        assert memory.read_file("compress.py") == "def compress(t, r): return t"
+
+    def test_execute_edit_file_no_match_in_seed(self, mock_sandbox, memory, budget):
+        """edit_file fails when old_string doesn't match seed compress.py."""
+        # MemoryManager seeds compress.py on init, so it always exists.
+        # But a random string won't match the seed content.
+        registry = ToolsRegistry(mock_sandbox, memory, budget)
+        result = registry.execute("edit_file", {
+            "old_string": "TOTALLY_RANDOM_STRING_12345",
+            "new_string": "something",
+        })
+        assert result["success"] is False
+        assert "not found" in result["error"]
 
     def test_execute_write_non_compress_skips_validation(self, mock_sandbox, memory, budget):
         # validate_imports should NOT be called for bible.md
@@ -429,7 +491,7 @@ class TestAgentInterface:
         interface.send_task("text", 0.5)
         last_call = provider.call_history[-1]
         assert last_call["tools"] is not None
-        assert len(last_call["tools"]) == 5
+        assert len(last_call["tools"]) == 6
 
     def test_system_prompt_passed_to_provider(self, interface, provider):
         interface.send_task("text", 0.5)
