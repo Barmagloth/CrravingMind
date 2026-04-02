@@ -231,6 +231,13 @@ class CLIProvider(LLMProvider):
     def _parse_response(self, raw_text: str) -> tuple[str, list]:
         """Extract (content, tool_calls) from the model's response text.
 
+        Handles three failure modes of the CLI provider:
+        1. Clean single JSON object (happy path).
+        2. Multi-turn roleplay: model generates [USER]/[ASSISTANT] continuations
+           after its first JSON — we extract only the first JSON object.
+        3. Truncated JSON: model ran out of tokens mid-output — we attempt
+           partial recovery but return (raw_text, []) if hopeless.
+
         Returns (raw_text, []) if JSON cannot be parsed, so the caller still
         gets something useful rather than crashing.
         """
@@ -241,20 +248,93 @@ class CLIProvider(LLMProvider):
         text = re.sub(r"\s*```$", "", text)
         text = text.strip()
 
+        # Try the happy path first: entire text is valid JSON.
+        data = self._try_parse_json(text)
+
+        if data is None:
+            # Multi-turn roleplay: model continued past its first JSON object.
+            # Find the first top-level {...} by brace-counting.
+            data = self._extract_first_json_object(text)
+
+        if data is None:
+            logger.warning(
+                "CLIProvider: could not parse any JSON from response (%d chars)",
+                len(raw_text),
+            )
+            return raw_text, []
+
+        content = data.get("content", "")
+        raw_calls = data.get("tool_calls", [])
+        tool_calls = []
+        for i, tc in enumerate(raw_calls):
+            tool_calls.append({
+                "id": f"cli_{i:04d}",
+                "name": tc.get("name", ""),
+                "arguments": tc.get("arguments", {}),
+            })
+        return content, tool_calls
+
+    @staticmethod
+    def _try_parse_json(text: str) -> dict | None:
+        """Try json.loads; return dict or None."""
         try:
             data = json.loads(text)
-            content = data.get("content", "")
-            raw_calls = data.get("tool_calls", [])
-            tool_calls = []
-            for i, tc in enumerate(raw_calls):
-                tool_calls.append({
-                    "id": f"cli_{i:04d}",
-                    "name": tc.get("name", ""),
-                    "arguments": tc.get("arguments", {}),
-                })
-            return content, tool_calls
-        except (json.JSONDecodeError, AttributeError):
-            return raw_text, []
+            if isinstance(data, dict):
+                return data
+        except (json.JSONDecodeError, ValueError):
+            pass
+        return None
+
+    @staticmethod
+    def _extract_first_json_object(text: str) -> dict | None:
+        """Extract the first balanced {...} from text and parse it.
+
+        Uses brace-counting with awareness of JSON string literals
+        (skips braces inside quoted strings).
+        """
+        start = text.find("{")
+        if start == -1:
+            return None
+
+        depth = 0
+        in_string = False
+        escape = False
+
+        for i in range(start, len(text)):
+            ch = text[i]
+
+            if escape:
+                escape = False
+                continue
+
+            if ch == "\\":
+                if in_string:
+                    escape = True
+                continue
+
+            if ch == '"':
+                in_string = not in_string
+                continue
+
+            if in_string:
+                continue
+
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    candidate = text[start : i + 1]
+                    try:
+                        data = json.loads(candidate)
+                        if isinstance(data, dict):
+                            return data
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    return None
+
+        # Braces never balanced (truncated response). Not recoverable.
+        return None
 
     def chat(
         self,
@@ -415,16 +495,40 @@ class AgentInterface:
         self._system_prompt = system_prompt
 
     def send_task(self, source_text: str, target_ratio: float) -> dict:
-        """Send a compression task to Crav. Returns the tool call results."""
+        """Send a compression task to Crav. Returns the tool call results.
+
+        DEPRECATED — prefer the auto-compress path in EpochRunner which
+        runs compress.py directly and sends only metrics via send_metrics().
+        Kept for backward compatibility with tests.
+        """
         pulse = self.budget.pulse_string()
         user_msg = f"{pulse}\n\nCompress the following text to {target_ratio:.0%} of its original length.\n\n{source_text}"
         self.conversation.append({"role": "user", "content": user_msg})
         return self._run_turn()
 
     def send_feedback(self, feedback: dict):
-        """Send Judge feedback to Crav after a task."""
+        """Append Judge feedback to conversation (no LLM call)."""
         msg = f"Task result: {json.dumps(feedback)}"
         self.conversation.append({"role": "user", "content": msg})
+
+    def send_metrics(self, task_idx: int, tasks_total: int, feedback: dict) -> dict:
+        """Send task metrics to Crav and let it react (improve compress.py).
+
+        The agent never sees the source text — only numerical feedback.
+        It gets a turn to read/write files and run scripts to improve
+        compress.py based on the metrics.
+        """
+        pulse = self.budget.pulse_string()
+        msg = (
+            f"{pulse}\n\n"
+            f"Task {task_idx}/{tasks_total} result: "
+            f"ratio={feedback.get('compression_ratio', 0):.2f} "
+            f"sem={feedback.get('semantic_score', 0):.2f} "
+            f"ent={feedback.get('entity_score', 0):.2f} "
+            f"{'PASS' if feedback.get('pass') else 'FAIL'}"
+        )
+        self.conversation.append({"role": "user", "content": msg})
+        return self._run_turn()
 
     def request_rnd(self) -> dict:
         """Ask Crav to do R&D (analyze results, update compress.py)."""
@@ -433,30 +537,51 @@ class AgentInterface:
         self.conversation.append({"role": "user", "content": msg})
         return self._run_turn()
 
+    # Maximum LLM round-trips per _run_turn call (read → fix → compress → done).
+    _MAX_TOOL_ROUNDS = 6
+
     def _run_turn(self) -> dict:
-        """Execute one turn: send to LLM, handle tool calls."""
-        max_tokens = max(1, min(4096, self.budget.remaining // 4))
+        """Execute one turn with a tool-use loop.
 
-        response = self.provider.chat(
-            messages=self.conversation,
-            tools=self.tools.get_tool_definitions(),
-            system=self._system_prompt,
-            max_tokens=max_tokens,
-        )
+        The agent may need several LLM round-trips to accomplish a task
+        (e.g. read_file → write_file → run_compress).  We loop until the
+        model stops requesting tools, the budget runs out, or we hit
+        _MAX_TOOL_ROUNDS to prevent runaway spending.
+        """
+        all_tool_calls: list = []
+        all_tool_results: list = []
+        total_tokens = 0
+        final_content = ""
+        alive = True
 
-        actual_tokens = response.usage["input_tokens"] + response.usage["output_tokens"]
-        alive = self.budget.spend(actual_tokens)
+        for _round in range(self._MAX_TOOL_ROUNDS):
+            max_tokens = max(1, min(4096, self.budget.remaining // 4))
 
-        # Add assistant message to conversation
-        self.conversation.append({"role": "assistant", "content": response.content})
+            response = self.provider.chat(
+                messages=self.conversation,
+                tools=self.tools.get_tool_definitions(),
+                system=self._system_prompt,
+                max_tokens=max_tokens,
+            )
 
-        # Handle tool calls and add results to conversation
-        tool_results = []
-        if response.tool_calls:
+            step_tokens = response.usage["input_tokens"] + response.usage["output_tokens"]
+            total_tokens += step_tokens
+            alive = self.budget.spend(step_tokens)
+            final_content = response.content
+
+            # Add assistant message to conversation.
+            self.conversation.append({"role": "assistant", "content": response.content})
+
+            if not response.tool_calls:
+                # Model finished — no more tools to call.
+                break
+
+            # Execute tool calls, feed results back into conversation.
+            all_tool_calls.extend(response.tool_calls)
             tool_result_contents = []
             for tc in response.tool_calls:
                 result = self.tools.execute(tc["name"], tc["arguments"])
-                tool_results.append({
+                all_tool_results.append({
                     "tool_call_id": tc["id"],
                     "name": tc["name"],
                     "result": result,
@@ -468,10 +593,14 @@ class AgentInterface:
                 })
             self.conversation.append({"role": "user", "content": tool_result_contents})
 
+            if not alive:
+                # Budget exhausted — stop looping.
+                break
+
         return {
-            "content": response.content,
-            "tool_calls": response.tool_calls,
-            "tool_results": tool_results,
-            "tokens_spent": actual_tokens,
+            "content": final_content,
+            "tool_calls": all_tool_calls,
+            "tool_results": all_tool_results,
+            "tokens_spent": total_tokens,
             "is_oom": not alive,
         }

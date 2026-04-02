@@ -966,25 +966,30 @@ function fvSelectTab(el) {
   fvRefresh();
 }
 
+function fvFetch(url) {
+  return fetch(url).then(r => {
+    if (!r.ok) return r.text().then(t => { throw new Error(t || r.statusText); });
+    return r.text();
+  });
+}
+
 function fvRefresh() {
   if (fvCurrentFile === 'artifact') {
     fvLoadArtifact();
   } else {
-    fetch('/api/files/' + fvCurrentFile)
-      .then(r => r.text())
+    fvFetch('/api/files/' + fvCurrentFile)
       .then(txt => fvDisplay(txt, fvCurrentFile))
-      .catch(e => fvDisplay('Error loading file: ' + e, 'txt'));
+      .catch(e => fvDisplay('(waiting for server…)', 'txt'));
   }
 }
 
 function fvLoadArtifact() {
   const sel = document.getElementById('fv-version-select');
   const ver = sel.value;
-  if (!ver) { fvDisplay('Select an artifact version above.', 'txt'); return; }
-  fetch('/api/artifacts/' + ver)
-    .then(r => r.text())
+  if (!ver) { fvDisplay('No artifacts exported yet.', 'txt'); return; }
+  fvFetch('/api/artifacts/' + ver)
     .then(txt => fvDisplay(txt, 'compress.py'))
-    .catch(e => fvDisplay('Error loading artifact: ' + e, 'txt'));
+    .catch(e => fvDisplay('Artifact not available: ' + e.message, 'txt'));
 }
 
 function fvViewArtifact(version) {

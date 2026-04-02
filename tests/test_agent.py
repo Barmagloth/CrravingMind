@@ -396,9 +396,10 @@ class TestAgentInterface:
         assert len(result["tool_calls"]) == 1
         assert len(result["tool_results"]) == 1
         assert result["tool_results"][0]["name"] == "run_compress"
-        # Conversation should have: user, assistant, user(tool_results)
-        assert len(iface.conversation) == 3
+        # Conversation: user, assistant(tool_call), user(tool_results), assistant(end_turn)
+        assert len(iface.conversation) == 4
         assert iface.conversation[2]["role"] == "user"
+        assert iface.conversation[3]["role"] == "assistant"
 
     def test_oom_flag_when_budget_exhausted(self, provider, mock_sandbox, memory):
         """is_oom=True when budget runs out."""

@@ -108,7 +108,14 @@ class EpochRunner:
     def _run_task(
         self, task: dict, epoch: int, task_idx: int = 0, tasks_total: int = 0
     ) -> dict:
-        """Run a single task within an epoch."""
+        """Run a single task within an epoch.
+
+        Flow (agent never sees source text):
+          1. Auto-run compress.py on source_text via sandbox.
+          2. Judge evaluates compressed output.
+          3. Send only numerical metrics to agent.
+          4. Agent reacts: may read/write compress.py, run scripts, etc.
+        """
         source_text = task["source_text"]
         target_ratio = task["target_ratio"]
         hidden_type = task.get("hidden_type", "discourse")
@@ -137,41 +144,21 @@ class EpochRunner:
                 }
             self.dedup.mark_task_seen(source_text, target_ratio)
 
-        # Send task to agent.
-        turn_result = self.agent.send_task(source_text, target_ratio)
-
-        if turn_result["is_oom"]:
-            self.logger.warning(
-                "[Epoch %d][Task %d/%d] OOM during task",
-                epoch, task_idx + 1, tasks_total,
-            )
-            return {"oom": True, "hidden_type": hidden_type, "is_dynamic": is_dynamic}
-
-        self.logger.info(
-            "[Epoch %d][Task %d/%d] Crav responded (%d tokens)",
-            epoch, task_idx + 1, tasks_total, turn_result["tokens_spent"],
+        # 1. Auto-run compress.py on source text (agent doesn't see this).
+        compress_result = self.agent.tools.execute(
+            "run_compress",
+            {"text": source_text, "target_ratio": target_ratio},
         )
+        compressed_text = compress_result.get("output", "") or ""
 
-        # Circuit breaker: warn if a single task consumed too large a fraction.
-        circuit_limit = self.budget.circuit_breaker_limit()
-        if turn_result["tokens_spent"] > circuit_limit:
+        if not compress_result.get("success"):
             self.logger.warning(
-                "Circuit breaker: task exceeded single-task token limit",
-                extra={
-                    "epoch": epoch,
-                    "tokens_spent": turn_result["tokens_spent"],
-                    "circuit_limit": circuit_limit,
-                },
+                "[Epoch %d][Task %d/%d] compress.py failed: %s",
+                epoch, task_idx + 1, tasks_total,
+                compress_result.get("error", "unknown error"),
             )
 
-        # Extract compressed_text from run_compress tool result.
-        compressed_text = ""
-        for tr in turn_result.get("tool_results", []):
-            if tr["name"] == "run_compress":
-                compressed_text = tr["result"].get("output", "") or ""
-                break
-
-        # Evaluate with judge.
+        # 2. Evaluate with judge.
         eval_result = self.judge.evaluate_task(
             source_text=source_text,
             compressed_text=compressed_text,
@@ -182,16 +169,38 @@ class EpochRunner:
             hidden_type=hidden_type,
         )
 
-        # Send feedback to agent (hidden_type is operator-only).
-        feedback = {k: v for k, v in eval_result.items() if k != "hidden_type"}
-        self.agent.send_feedback(feedback)
-
         verdict = "PASS" if eval_result["pass"] else "FAIL"
         self.logger.info(
-            "[Epoch %d][Task %d/%d] Judge: semantic=%.2f entity=%.2f  %s",
+            "[Epoch %d][Task %d/%d] Judge: sem=%.2f ent=%.2f  %s",
             epoch, task_idx + 1, tasks_total,
             eval_result["semantic_score"], eval_result["entity_score"], verdict,
         )
+
+        # 3. Send metrics to agent and let it react (improve compress.py).
+        feedback = {k: v for k, v in eval_result.items() if k != "hidden_type"}
+        turn_result = self.agent.send_metrics(
+            task_idx=task_idx + 1,
+            tasks_total=tasks_total,
+            feedback=feedback,
+        )
+
+        if turn_result["is_oom"]:
+            self.logger.warning(
+                "[Epoch %d][Task %d/%d] OOM during agent reaction",
+                epoch, task_idx + 1, tasks_total,
+            )
+
+        # Circuit breaker: warn if agent's reaction consumed too many tokens.
+        circuit_limit = self.budget.circuit_breaker_limit()
+        if turn_result["tokens_spent"] > circuit_limit:
+            self.logger.warning(
+                "Circuit breaker: task exceeded single-task token limit",
+                extra={
+                    "epoch": epoch,
+                    "tokens_spent": turn_result["tokens_spent"],
+                    "circuit_limit": circuit_limit,
+                },
+            )
 
         task_result = {
             "task_score": eval_result["task_score"],
@@ -351,32 +360,31 @@ class EpochRunner:
         return (
             "You are Crav, an LLM agent whose sole job is to optimize a text compression function.\n\n"
             f"Epoch {epoch} | {phase_descriptions.get(phase, '')}\n\n"
-            "## YOUR TASK\n"
-            "For each task you receive a source text and a target_ratio. Call run_compress to compress the text. "
-            "After each task you receive feedback: compression_ratio, semantic_score, entity_score, and pass/fail.\n\n"
-            "## compress() RULES — READ CAREFULLY\n"
-            "Your compress.py must contain a function with this exact signature:\n"
-            "    def compress(text: str, target_ratio: float) -> str\n\n"
-            "compress() MUST be PURE PYTHON — no LLM calls, no network access, no API calls.\n\n"
-            "ALLOWED imports (standard library + these third-party packages):\n"
-            "  re, math, collections, itertools, functools, string, unicodedata, json, heapq,\n"
-            "  pathlib, typing, dataclasses, abc, copy, os.path — and:\n"
-            "  numpy, scikit-learn (sklearn), spacy, nltk\n\n"
-            "FORBIDDEN — these will be REJECTED before saving:\n"
-            "  anthropic, openai, requests, urllib, httplib, http.client, socket,\n"
-            "  subprocess, os (as a top-level import), any network or API library\n\n"
-            "If you try to write a compress.py with a forbidden import, write_file will return an error "
-            "and the file will NOT be saved.\n\n"
-            "## AVAILABLE TOOLS\n"
-            "- run_compress(text, target_ratio): Run your compress() on the given text\n"
-            "- read_file(filename): Read bible.md, graveyard.md, or compress.py\n"
-            "- write_file(filename, content): Write to bible.md, graveyard.md, or compress.py\n"
-            "  * Writing compress.py validates imports and runs a smoke test automatically.\n"
-            "- run_script(code): Execute a pure-Python script in your workspace\n"
-            "- audit_budget(): Check your remaining token budget\n\n"
+            "## HOW IT WORKS\n"
+            "You have a file compress.py with a function: compress(text, target_ratio) -> str.\n"
+            "The system automatically runs your compress.py on benchmark texts and scores the output.\n"
+            "You will receive ONLY the numerical metrics — you never see the source texts.\n"
+            "Your job: read the metrics, improve compress.py, repeat.\n\n"
+            "After each task you get: compression_ratio, semantic_score, entity_score, PASS/FAIL.\n"
+            "  - semantic_score: cosine similarity of QA answers (compressed vs original)\n"
+            "  - entity_score: named entity F1 (facts, names, numbers)\n"
+            "  - PASS requires both scores ≥ 0.85 AND ratio within target\n\n"
+            "## compress() RULES\n"
+            "Signature: def compress(text: str, target_ratio: float) -> str\n"
+            "MUST be pure Python — no LLM calls, no network, no API calls.\n"
+            "ALLOWED: re, math, collections, itertools, functools, string, unicodedata,\n"
+            "  json, heapq, pathlib, typing, dataclasses, abc, copy, os.path,\n"
+            "  numpy, sklearn, spacy, nltk\n"
+            "FORBIDDEN: anthropic, openai, requests, urllib, socket, subprocess, os\n\n"
+            "## TOOLS\n"
+            "- read_file(filename): Read compress.py, bible.md, or graveyard.md\n"
+            "- write_file(filename, content): Write files (compress.py runs smoke test)\n"
+            "- run_script(code): Run a Python script in your workspace to test ideas\n"
+            "- run_compress(text, target_ratio): Test compress() on your own sample text\n"
+            "- audit_budget(): Check remaining token budget\n\n"
             "## BUDGET\n"
-            "Every token you spend costs budget. When budget runs out the epoch ends. Be efficient.\n\n"
-            "For each task, call run_compress with the provided text and target_ratio."
+            "Every token costs budget. When budget runs out the epoch ends.\n"
+            "Be efficient — read metrics, make targeted improvements, minimize chatter."
         )
 
     # ------------------------------------------------------------------

@@ -628,7 +628,14 @@ class TestCircuitBreaker:
             usage={"input_tokens": 400, "output_tokens": 400},  # 800 total > limit
             stop_reason="tool_use",
         )
-        provider = MockProvider([expensive_response] * 5)
+        end_turn = LLMResponse(
+            content="done",
+            tool_calls=[],
+            usage={"input_tokens": 20, "output_tokens": 20},
+            stop_reason="end_turn",
+        )
+        # Tool-use loop: expensive (tool call) → end_turn (no tools) per task.
+        provider = MockProvider([expensive_response, end_turn] * 5)
         bm = BudgetManager(config)
         agent_workspace = str(tmp_path / "agent")
         mem = MemoryManager(config, agent_workspace)
@@ -825,7 +832,11 @@ class TestArtifactExport:
         }
         agent_workspace = str(tmp_path / "agent")
         mem = MemoryManager(config, agent_workspace)
-        # No compress.py written → empty
+        # Overwrite seed with empty content to simulate no agent code.
+        import os
+        compress_path = os.path.join(agent_workspace, "compress.py")
+        if os.path.exists(compress_path):
+            os.remove(compress_path)
 
         runner = _make_runner(
             n_tasks=1,
@@ -937,50 +948,50 @@ class TestSystemPrompt:
 # ---------------------------------------------------------------------------
 
 class TestAgentFeedback:
-    def test_feedback_sent_after_each_task(self, tmp_path):
-        """agent.send_feedback() is called once per completed task."""
+    def test_metrics_sent_after_each_task(self, tmp_path):
+        """agent.send_metrics() is called once per completed task."""
         runner = _make_runner(n_tasks=3, tmp_path=tmp_path, run_dir=str(tmp_path / "run"))
         tasks = [_task(source_text=f"text {i}") for i in range(3)]
 
-        # Wrap agent.send_feedback to track calls.
-        feedback_calls = []
-        original_send_feedback = runner.agent.send_feedback
+        # Wrap agent.send_metrics to track calls.
+        metrics_calls = []
+        original_send_metrics = runner.agent.send_metrics
 
-        def tracking_feedback(fb):
-            feedback_calls.append(fb)
-            return original_send_feedback(fb)
+        def tracking_metrics(**kwargs):
+            metrics_calls.append(kwargs)
+            return original_send_metrics(**kwargs)
 
-        runner.agent.send_feedback = tracking_feedback
+        runner.agent.send_metrics = tracking_metrics
         runner.run_epoch(epoch=0, tasks=tasks)
-        assert len(feedback_calls) == 3
+        assert len(metrics_calls) == 3
 
-    def test_feedback_excludes_hidden_type(self, tmp_path):
+    def test_metrics_excludes_hidden_type(self, tmp_path):
         """hidden_type must NOT be sent to agent in feedback."""
         runner = _make_runner(n_tasks=1, tmp_path=tmp_path, run_dir=str(tmp_path / "run"))
-        feedback_calls = []
-        original = runner.agent.send_feedback
+        metrics_calls = []
+        original = runner.agent.send_metrics
 
-        def capture(fb):
-            feedback_calls.append(fb)
-            return original(fb)
+        def capture(**kwargs):
+            metrics_calls.append(kwargs)
+            return original(**kwargs)
 
-        runner.agent.send_feedback = capture
+        runner.agent.send_metrics = capture
         runner.run_epoch(epoch=0, tasks=[_task()])
-        assert len(feedback_calls) == 1
-        assert "hidden_type" not in feedback_calls[0]
+        assert len(metrics_calls) == 1
+        assert "hidden_type" not in metrics_calls[0]["feedback"]
 
-    def test_feedback_includes_task_score(self, tmp_path):
+    def test_metrics_includes_task_score(self, tmp_path):
         """Feedback payload includes task_score and pass."""
         runner = _make_runner(n_tasks=1, tmp_path=tmp_path, run_dir=str(tmp_path / "run"))
-        feedback_calls = []
-        original = runner.agent.send_feedback
+        metrics_calls = []
+        original = runner.agent.send_metrics
 
-        def capture(fb):
-            feedback_calls.append(fb)
-            return original(fb)
+        def capture(**kwargs):
+            metrics_calls.append(kwargs)
+            return original(**kwargs)
 
-        runner.agent.send_feedback = capture
+        runner.agent.send_metrics = capture
         runner.run_epoch(epoch=0, tasks=[_task()])
-        fb = feedback_calls[0]
+        fb = metrics_calls[0]["feedback"]
         assert "task_score" in fb
         assert "pass" in fb
