@@ -70,15 +70,22 @@ class EpochRunner:
         """Run a single epoch. Returns epoch result dict."""
         phase = self.phase_manager.get_phase(epoch)
 
+        # Assign a unique name to this epoch's agent.
+        crav_name = f"Crav-{epoch + 1:03d}"
+        self.agent.crav_id = crav_name
+
         # 1. Initialise budget with venture multiplier and R&D carry-over.
         self.budget.start_epoch(epoch, prev_success_rate, prev_saved, prev_oom)
         self._write_live_state(epoch, tasks_completed=0, tasks_total=len(tasks))
+
+        # Clean up expired graveyard entries (TTL).
+        self.memory.cleanup_graveyard(epoch)
 
         # 2. Backup memory for OOM rollback (Phase 2+).
         backup = self.memory.backup() if self.phase_manager.has_memory(epoch) else None
 
         # 3. Build system prompt and reset agent conversation.
-        system_prompt = self._build_system_prompt(epoch, phase)
+        system_prompt = self._build_system_prompt(epoch, phase, crav_name)
         self.agent.start_epoch(epoch, system_prompt)
 
         self.logger.info(
@@ -177,30 +184,43 @@ class EpochRunner:
         )
 
         # 3. Send metrics to agent and let it react (improve compress.py).
+        #    In starvation mode: skip agent turn entirely — just keep running
+        #    tasks with existing compress.py, don't waste tokens on LLM calls.
         feedback = {k: v for k, v in eval_result.items() if k != "hidden_type"}
-        turn_result = self.agent.send_metrics(
-            task_idx=task_idx + 1,
-            tasks_total=tasks_total,
-            feedback=feedback,
-        )
+        tokens_spent = 0
 
-        if turn_result["is_oom"]:
-            self.logger.warning(
-                "[Epoch %d][Task %d/%d] OOM during agent reaction",
+        if self.budget.is_critical_starvation:
+            self.logger.info(
+                "[Epoch %d][Task %d/%d] Starvation mode — skipping agent turn",
                 epoch, task_idx + 1, tasks_total,
             )
-
-        # Circuit breaker: warn if agent's reaction consumed too many tokens.
-        circuit_limit = self.budget.circuit_breaker_limit()
-        if turn_result["tokens_spent"] > circuit_limit:
-            self.logger.warning(
-                "Circuit breaker: task exceeded single-task token limit",
-                extra={
-                    "epoch": epoch,
-                    "tokens_spent": turn_result["tokens_spent"],
-                    "circuit_limit": circuit_limit,
-                },
+            # Still append feedback so agent sees it if budget recovers.
+            self.agent.send_feedback(feedback)
+        else:
+            turn_result = self.agent.send_metrics(
+                task_idx=task_idx + 1,
+                tasks_total=tasks_total,
+                feedback=feedback,
             )
+            tokens_spent = turn_result["tokens_spent"]
+
+            if turn_result["is_oom"]:
+                self.logger.warning(
+                    "[Epoch %d][Task %d/%d] OOM during agent reaction",
+                    epoch, task_idx + 1, tasks_total,
+                )
+
+            # Circuit breaker: warn if agent's reaction consumed too many tokens.
+            circuit_limit = self.budget.circuit_breaker_limit()
+            if tokens_spent > circuit_limit:
+                self.logger.warning(
+                    "Circuit breaker: task exceeded single-task token limit",
+                    extra={
+                        "epoch": epoch,
+                        "tokens_spent": tokens_spent,
+                        "circuit_limit": circuit_limit,
+                    },
+                )
 
         task_result = {
             "task_score": eval_result["task_score"],
@@ -210,13 +230,13 @@ class EpochRunner:
             "compression_ratio": eval_result["compression_ratio"],
             "semantic_score": eval_result["semantic_score"],
             "entity_score": eval_result["entity_score"],
-            "tokens_spent": turn_result["tokens_spent"],
+            "tokens_spent": tokens_spent,
             "task_idx": task_idx + 1,
             "tasks_total": tasks_total,
             "task_id": task_id,
             "target_ratio": target_ratio,
-            "tool_calls": self._format_tool_calls_log(turn_result),
-            "crav_text": (turn_result.get("content") or "")[:1000],
+            "tool_calls": self._format_tool_calls_log(turn_result) if not self.budget.is_critical_starvation else [],
+            "crav_text": (turn_result.get("content") or "")[:1000] if not self.budget.is_critical_starvation else "(starvation)",
         }
         return task_result
 
@@ -325,6 +345,11 @@ class EpochRunner:
             extra = self._compute_export_metadata(completed)
             artifact_path = self._export_artifact(epoch, combined, extra)
 
+        # Write epitaph to graveyard (after OOM rollback, so it persists).
+        self._write_epitaph(
+            epoch, completed, results, combined, artifact_path is not None,
+        )
+
         epoch_result = {
             "epoch": epoch,
             "success_rate": combined,
@@ -349,7 +374,7 @@ class EpochRunner:
     # System prompt
     # ------------------------------------------------------------------
 
-    def _build_system_prompt(self, epoch: int, phase: int) -> str:
+    def _build_system_prompt(self, epoch: int, phase: int, crav_name: str = "Crav") -> str:
         """Build Crav's system prompt based on current phase."""
         phase_descriptions = {
             1: "Phase 1 — Venture: Generous token budget for exploration and experimentation.",
@@ -358,7 +383,7 @@ class EpochRunner:
         }
 
         return (
-            "You are Crav, an LLM agent whose sole job is to optimize a text compression function.\n\n"
+            f"You are {crav_name}, an LLM agent whose sole job is to optimize a text compression function.\n\n"
             f"Epoch {epoch} | {phase_descriptions.get(phase, '')}\n\n"
             "## HOW IT WORKS\n"
             "You have a file compress.py with a function: compress(text, target_ratio) -> str.\n"
@@ -382,10 +407,57 @@ class EpochRunner:
             "- run_script(code): Run a Python script in your workspace to test ideas\n"
             "- run_compress(text, target_ratio): Test compress() on your own sample text\n"
             "- audit_budget(): Check remaining token budget\n\n"
+            "## GRAVEYARD\n"
+            "Read graveyard.md to see what happened to previous agents.\n"
+            "Learn from their failures — don't repeat the same mistakes.\n\n"
             "## BUDGET\n"
-            "Every token costs budget. When budget runs out the epoch ends.\n"
+            "Every token costs budget. When budget runs out you die (OOM).\n"
             "Be efficient — read metrics, make targeted improvements, minimize chatter."
         )
+
+    def _write_epitaph(
+        self, epoch: int, completed: list, all_results: list,
+        success_rate: float, has_artifact: bool,
+    ) -> None:
+        """Write a brief epitaph for this epoch's agent to graveyard.md."""
+        crav_name = self.agent.crav_id
+        n_passed = sum(1 for r in completed if r.get("passed"))
+        n_completed = len(completed)
+        n_total = len(all_results)
+
+        # Cause of death.
+        if self.budget.is_oom:
+            cause = "OOM"
+        elif success_rate >= float(self.config.get("judge", {}).get("pass_threshold", 0.85)):
+            cause = "SURVIVED"
+        elif n_completed == 0:
+            cause = "instant OOM"
+        else:
+            cause = f"SR={success_rate:.0%}"
+
+        # Per-type breakdown.
+        by_type: dict[str, list[bool]] = {}
+        for r in completed:
+            t = r.get("hidden_type", "?")
+            by_type.setdefault(t, []).append(r.get("passed", False))
+        type_parts = []
+        for t, results in sorted(by_type.items()):
+            p = sum(results)
+            type_parts.append(f"{t}={p}/{len(results)}")
+        type_info = " ".join(type_parts) if type_parts else "no tasks"
+
+        artifact_tag = " | artifact exported" if has_artifact else ""
+
+        epitaph = (
+            f"<!-- AMENDMENT:epoch={epoch} -->\n"
+            f"{crav_name} | E{epoch} | {n_passed}/{n_completed} pass"
+            f" ({n_total} queued) | {type_info} | died: {cause}{artifact_tag}\n"
+            f"<!-- /AMENDMENT -->\n"
+        )
+
+        # Append to existing graveyard.
+        existing = self.memory.read_file("graveyard.md")
+        self.memory.write_file("graveyard.md", existing + epitaph)
 
     # ------------------------------------------------------------------
     # Live state
