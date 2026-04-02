@@ -602,9 +602,10 @@ class AgentInterface:
         just send the bare request as the next conversation turn.
         """
         msg = (
-            "Epoch over. Write ONE short line (max 200 chars) for the graveyard: "
-            "what you added/removed in compress.py this epoch and what effect it had. "
-            "No tools, just text."
+            "Epoch over. Summarize for the graveyard in 2-3 SHORT sentences (max 300 chars total): "
+            "what strategy you used, what you changed in compress.py, best scores achieved, "
+            "and why it wasn't enough. Be specific (mention function names, thresholds, scores). "
+            "No tools, just text. No JSON wrapper."
         )
         self.conversation.append({"role": "user", "content": msg})
 
@@ -612,7 +613,7 @@ class AgentInterface:
             messages=self.conversation,
             tools=[],
             system="",
-            max_tokens=150,
+            max_tokens=200,
         )
         self.conversation.append({"role": "assistant", "content": response.content})
 
@@ -626,7 +627,18 @@ class AgentInterface:
                 text = data.get("content", text)
             except (ValueError, AttributeError):
                 pass
-        return text[:200]
+        return self._truncate_at_word_boundary(text, 300)
+
+    @staticmethod
+    def _truncate_at_word_boundary(text: str, limit: int) -> str:
+        """Truncate text at a word boundary, ending with '…' if shortened."""
+        if len(text) <= limit:
+            return text
+        # Find last space before limit.
+        cut = text.rfind(" ", 0, limit)
+        if cut <= 0:
+            cut = limit
+        return text[:cut].rstrip(".,;:—- ") + "…"
 
     # Maximum LLM round-trips per _run_turn call (read → fix → compress → done).
     _MAX_TOOL_ROUNDS = 6
