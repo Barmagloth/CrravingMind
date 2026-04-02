@@ -660,7 +660,7 @@ function render(s) {
   document.getElementById('phase-pct-txt').textContent = 'Epoch ' + epochNum;
 
   // Efficiency
-  document.getElementById('cost-pass').textContent = fmt(eff.cost_per_pass ?? 0);
+  document.getElementById('cost-pass').textContent = eff.cost_per_pass != null ? fmt(eff.cost_per_pass) : '—';
   setStatVal('eff-sr', (eff.success_rate_pct ?? 0) + '%', pctColor(eff.success_rate_pct ?? 0));
   document.getElementById('frozen-sr').textContent = (eff.frozen_success_rate_pct ?? 0) + '%';
   document.getElementById('dyn-sr').textContent = (eff.dynamic_success_rate_pct ?? 0) + '%';

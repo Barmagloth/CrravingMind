@@ -119,10 +119,10 @@ class MetricsCollector:
             int(e.get("tasks_completed", 0) * e.get("success_rate", 0.0))
             for e in epoch_history
         )
-        cost_per_pass = total_spent / max(passed_tasks, 1)
+        cost_per_pass = total_spent / passed_tasks if passed_tasks > 0 else None
 
         return {
-            "cost_per_pass": round(cost_per_pass, 1),
+            "cost_per_pass": round(cost_per_pass, 1) if cost_per_pass is not None else None,
             "success_rate_pct": round(avg_sr * 100, 1),
             "frozen_success_rate_pct": round(avg_frozen * 100, 1),
             "dynamic_success_rate_pct": round(avg_dynamic * 100, 1),
