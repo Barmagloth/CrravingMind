@@ -281,7 +281,21 @@ def main() -> None:
 
     tasks_per_epoch = config.get("benchmark", {}).get("tasks_per_epoch", 10)
 
+    def _check_stop_signal() -> bool:
+        """Check if dashboard sent a stop signal."""
+        ctrl_path = os.path.join(run_dir, "control.json")
+        try:
+            with open(ctrl_path, "r", encoding="utf-8") as f:
+                ctrl = json.load(f)
+            return ctrl.get("stopped", False)
+        except (OSError, ValueError):
+            return False
+
     for epoch in range(start_epoch, args.max_epochs):
+        if _check_stop_signal():
+            logger.info("Stop signal received — ending run gracefully")
+            break
+
         epoch_tasks = benchmark_loader.select_frozen_subset(all_frozen, tasks_per_epoch)
         logger.info(
             "[Epoch %d] Queuing %d tasks (budget: %d tokens)",

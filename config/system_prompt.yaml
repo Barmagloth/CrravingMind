@@ -41,7 +41,7 @@ template: |
   Prefer edit_file over write_file — it sends only the changed part, saving budget.
 
   {graveyard_section}
-  Learn from their failures — don't repeat the same mistakes.
+  Learn from their failures — consider their mistakes.
 
   ## BUDGET
   Every LLM call costs budget. When budget hits zero, you die (OOM).

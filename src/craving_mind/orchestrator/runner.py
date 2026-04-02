@@ -103,6 +103,14 @@ class EpochRunner:
         for task_idx, task in enumerate(tasks):
             if self.budget.is_oom:
                 break
+
+            # Check control signals between tasks.
+            ctrl = self._read_control()
+            while ctrl.get("paused"):
+                import time
+                time.sleep(1)
+                ctrl = self._read_control()
+
             result = self._run_task(task, epoch, task_idx=task_idx, tasks_total=tasks_total)
             results.append(result)
             if self.checkpoint and not result.get("skipped"):
@@ -505,6 +513,15 @@ class EpochRunner:
     # ------------------------------------------------------------------
     # Live state
     # ------------------------------------------------------------------
+
+    def _read_control(self) -> dict:
+        """Read control.json from run_dir; return defaults if missing."""
+        path = os.path.join(self.run_dir, "control.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return {"paused": False, "stopped": False}
 
     def _write_live_state(self, epoch: int, tasks_completed: int, tasks_total: int) -> None:
         """Write live_state.json so the dashboard can show real-time budget/progress."""

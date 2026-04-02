@@ -65,6 +65,11 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .phase-3 { background: #3a0a0a; color: #e94560; }
   .ws-dot { width: 10px; height: 10px; border-radius: 50%; background: #e94560; transition: background .4s; }
   .ws-dot.connected { background: var(--success); box-shadow: 0 0 6px var(--success); }
+  .ctrl-btn { background: var(--bg3); color: var(--text); border: 1px solid var(--border); border-radius: 4px; padding: 3px 10px; font-size: 12px; cursor: pointer; margin-right: 6px; transition: all .2s; }
+  .ctrl-btn:hover { background: var(--accent); color: #fff; }
+  .ctrl-btn.ctrl-stop:hover { background: #e94560; }
+  .ctrl-btn.active { background: var(--warn); color: #000; border-color: var(--warn); }
+  .ctrl-btn.active.ctrl-stop { background: #e94560; color: #fff; border-color: #e94560; }
   .spacer { flex: 1; }
   .ts-display { font-size: 11px; color: var(--muted); font-family: var(--mono); }
 
@@ -368,6 +373,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <span class="tb-val" id="tb-best">—</span>
   </div>
   <div class="spacer"></div>
+  <button id="btn-pause" class="ctrl-btn" onclick="ctrlPause()" title="Pause after current task">⏸ Pause</button>
+  <button id="btn-stop" class="ctrl-btn ctrl-stop" onclick="ctrlStop()" title="Stop after current epoch">⏹ Stop</button>
   <span class="ts-display" id="tb-ts">—</span>
   <div class="ws-dot" id="ws-dot" title="WebSocket"></div>
 </div>
@@ -590,6 +597,52 @@ let artifactVersions = [];
 const fvHashes = {};     // filename → last seen hash
 const fvVersions = {};   // filename → version counter (1-based)
 
+// ============================================================
+// Run Control (pause / stop)
+// ============================================================
+function ctrlPause() {
+  const btn = document.getElementById('btn-pause');
+  const isPaused = btn.classList.toggle('active');
+  btn.textContent = isPaused ? '▶ Resume' : '⏸ Pause';
+  fetch('/api/control', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: isPaused ? 'pause' : 'resume'}),
+  });
+}
+
+function ctrlStop() {
+  if (!confirm('Stop the run after current epoch finishes?')) return;
+  const btn = document.getElementById('btn-stop');
+  btn.classList.add('active');
+  btn.textContent = '⏹ Stopping…';
+  btn.disabled = true;
+  fetch('/api/control', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'stop'}),
+  });
+}
+
+// Update button states from server control state.
+function updateControlButtons(ctrl) {
+  if (!ctrl) return;
+  const pauseBtn = document.getElementById('btn-pause');
+  const stopBtn = document.getElementById('btn-stop');
+  if (ctrl.paused) {
+    pauseBtn.classList.add('active');
+    pauseBtn.textContent = '▶ Resume';
+  } else {
+    pauseBtn.classList.remove('active');
+    pauseBtn.textContent = '⏸ Pause';
+  }
+  if (ctrl.stopped) {
+    stopBtn.classList.add('active');
+    stopBtn.textContent = '⏹ Stopping…';
+    stopBtn.disabled = true;
+  }
+}
+
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   ws = new WebSocket(`${proto}://${location.host}/ws`);
@@ -621,6 +674,10 @@ function render(s) {
   const evo = s.evolution || {};
   const art = s.artifact || {};
   const hist = s.epoch_history || [];
+  const ctrl = s.control || {};
+
+  // Control buttons
+  updateControlButtons(ctrl);
 
   // Top bar
   document.getElementById('tb-epoch').textContent = live.current_epoch ?? '—';
@@ -1245,6 +1302,7 @@ class DashboardServer:
         self.run_dir = run_dir
         self.storage = MetricsStorage(run_dir)
         self.collector = MetricsCollector(self.storage, config)
+        self._control_path = os.path.join(run_dir, "control.json")
         self.app = self._create_app()
 
     # ------------------------------------------------------------------
@@ -1267,6 +1325,7 @@ class DashboardServer:
             try:
                 while True:
                     state = self.collector.get_dashboard_state()
+                    state["control"] = self._read_control()
                     await websocket.send_json(state)
                     await asyncio.sleep(interval)
             except WebSocketDisconnect:
@@ -1336,7 +1395,51 @@ class DashboardServer:
             except OSError as exc:
                 return PlainTextResponse(f"Error reading artifact: {exc}", status_code=500)
 
+        @app.post("/api/control")
+        async def control(request: Request):
+            """Set run control signals (pause/resume/stop)."""
+            import json as _json
+            body = await request.json()
+            action = body.get("action", "")
+
+            # Read current state.
+            ctrl = self._read_control()
+
+            if action == "pause":
+                ctrl["paused"] = True
+            elif action == "resume":
+                ctrl["paused"] = False
+            elif action == "stop":
+                ctrl["stopped"] = True
+            else:
+                return JSONResponse({"error": f"Unknown action: {action}"}, status_code=400)
+
+            self._write_control(ctrl)
+            return JSONResponse({"ok": True, **ctrl})
+
+        @app.get("/api/control")
+        async def control_state():
+            return JSONResponse(self._read_control())
+
         return app
+
+    def _read_control(self) -> dict:
+        """Read control.json; return defaults if missing."""
+        try:
+            with open(self._control_path, "r", encoding="utf-8") as f:
+                import json as _json
+                return _json.load(f)
+        except (OSError, ValueError):
+            return {"paused": False, "stopped": False}
+
+    def _write_control(self, ctrl: dict) -> None:
+        """Write control.json atomically."""
+        import json as _json
+        try:
+            with open(self._control_path, "w", encoding="utf-8") as f:
+                _json.dump(ctrl, f)
+        except OSError:
+            pass
 
     # ------------------------------------------------------------------
     # Start
