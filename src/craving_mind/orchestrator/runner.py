@@ -419,7 +419,11 @@ class EpochRunner:
         self, epoch: int, completed: list, all_results: list,
         success_rate: float, has_artifact: bool,
     ) -> None:
-        """Write a brief epitaph for this epoch's agent to graveyard.md."""
+        """Write a brief epitaph for this epoch's agent to graveyard.md.
+
+        Asks the agent for last words (1 line: what it tried, why it failed),
+        then appends a structured epitaph block to graveyard.md.
+        """
         crav_name = self.agent.crav_id
         n_passed = sum(1 for r in completed if r.get("passed"))
         n_completed = len(completed)
@@ -448,12 +452,19 @@ class EpochRunner:
 
         artifact_tag = " | artifact exported" if has_artifact else ""
 
-        epitaph = (
-            f"<!-- AMENDMENT:epoch={epoch} -->\n"
+        # Ask the agent for last words (what it tried, why it failed).
+        last_words = self.agent.request_last_words()
+
+        lines = [
+            f"<!-- AMENDMENT:epoch={epoch} -->",
             f"{crav_name} | E{epoch} | {n_passed}/{n_completed} pass"
-            f" ({n_total} queued) | {type_info} | died: {cause}{artifact_tag}\n"
-            f"<!-- /AMENDMENT -->\n"
-        )
+            f" ({n_total} queued) | {type_info} | died: {cause}{artifact_tag}",
+        ]
+        if last_words:
+            lines.append(last_words)
+        lines.append("<!-- /AMENDMENT -->")
+
+        epitaph = "\n".join(lines) + "\n"
 
         # Append to existing graveyard.
         existing = self.memory.read_file("graveyard.md")

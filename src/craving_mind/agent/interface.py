@@ -537,6 +537,46 @@ class AgentInterface:
         self.conversation.append({"role": "user", "content": msg})
         return self._run_turn()
 
+    def request_last_words(self) -> str:
+        """Ask the dying agent for a 1-line epitaph: what it tried, why it failed.
+
+        Uses a single LLM call with max_tokens capped low.
+        Returns the agent's text, or "" if budget is exhausted.
+        """
+        if self.budget.remaining < 50:
+            return ""
+
+        msg = (
+            "Epoch over. Write ONE short line for the graveyard: "
+            "what approach you tried and why it failed. No tools, just text."
+        )
+        self.conversation.append({"role": "user", "content": msg})
+
+        # Single shot, no tool loop — cap output hard.
+        max_tokens = min(150, max(1, self.budget.remaining // 4))
+        response = self.provider.chat(
+            messages=self.conversation,
+            tools=[],
+            system=self._system_prompt,
+            max_tokens=max_tokens,
+        )
+
+        step_tokens = response.usage["input_tokens"] + response.usage["output_tokens"]
+        self.budget.spend(step_tokens)
+        self.conversation.append({"role": "assistant", "content": response.content})
+
+        # Return just the text, stripped of any JSON wrapper.
+        text = response.content.strip()
+        # CLI provider may still wrap in JSON.
+        if text.startswith("{"):
+            try:
+                import json as _json
+                data = _json.loads(text)
+                text = data.get("content", text)
+            except (ValueError, AttributeError):
+                pass
+        return text[:200]
+
     # Maximum LLM round-trips per _run_turn call (read → fix → compress → done).
     _MAX_TOOL_ROUNDS = 6
 
