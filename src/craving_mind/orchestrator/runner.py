@@ -398,6 +398,14 @@ class EpochRunner:
             3: "Phase 3 — Survival: Critical budget. Every token counts.",
         }
 
+        # Embed graveyard directly so agent doesn't waste a tool round reading it.
+        graveyard = self.memory.read_file("graveyard.md").strip()
+        graveyard_section = "## GRAVEYARD — previous agents\n"
+        if graveyard:
+            graveyard_section += graveyard + "\n"
+        else:
+            graveyard_section += "(no previous agents yet)\n"
+
         return (
             f"You are {crav_name}, an LLM agent whose sole job is to optimize a text compression function.\n\n"
             f"Epoch {epoch} | {phase_descriptions.get(phase, '')}\n\n"
@@ -418,7 +426,7 @@ class EpochRunner:
             "  numpy, sklearn, spacy, nltk\n"
             "FORBIDDEN: anthropic, openai, requests, urllib, socket, subprocess, os\n\n"
             "## TOOLS\n"
-            "- read_file(filename): Read compress.py, bible.md, or graveyard.md\n"
+            "- read_file(filename): Read compress.py or bible.md\n"
             "- edit_file(old_string, new_string): Patch compress.py — CHEAP, send only the diff\n"
             "- write_file(filename, content): Full file overwrite — EXPENSIVE, use only for new files\n"
             "- run_script(code): Run a Python script in your workspace to test ideas\n"
@@ -426,8 +434,7 @@ class EpochRunner:
             "- audit_budget(): Check remaining token budget\n\n"
             "IMPORTANT: To modify compress.py, use edit_file (sends only the changed part).\n"
             "write_file sends the ENTIRE file content and wastes your budget.\n\n"
-            "## GRAVEYARD\n"
-            "Read graveyard.md to see what happened to previous agents.\n"
+            f"{graveyard_section}\n"
             "Learn from their failures — don't repeat the same mistakes.\n\n"
             "## BUDGET\n"
             "Every token costs budget. When budget runs out you die (OOM).\n"
