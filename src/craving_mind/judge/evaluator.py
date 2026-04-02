@@ -165,7 +165,13 @@ class ConcreteJudgeEvaluator(JudgeEvaluator):
         super().__init__(config=config, **kwargs)
         self._provider = provider
 
+    def _reset_provider_session(self) -> None:
+        """Drop CLI session so judge QA calls are independent (no context bleed)."""
+        if hasattr(self._provider, "new_session"):
+            self._provider.new_session()
+
     def _query_llm(self, context: str, question: str) -> str:
+        self._reset_provider_session()
         messages = [
             {"role": "user", "content": f"Context:\n{context}\n\nQuestion: {question}"}
         ]
@@ -177,12 +183,14 @@ class ConcreteJudgeEvaluator(JudgeEvaluator):
 
         Sends numbered questions, expects numbered answers.
         Falls back to per-question calls if parsing fails.
+        Resets CLI session first so no previous context bleeds in.
         """
         if not questions:
             return []
         if len(questions) == 1:
             return [self._query_llm(context, questions[0])]
 
+        self._reset_provider_session()
         numbered = "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions))
         prompt = (
             f"Context:\n{context}\n\n"
