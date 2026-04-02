@@ -60,6 +60,14 @@ class JudgeEvaluator(abc.ABC):
         real LLM (e.g. Anthropic API) here; tests inject a mock.
         """
 
+    def _query_llm_batch(self, context: str, questions: list[str]) -> list[str]:
+        """Answer multiple questions in one LLM call.
+
+        Default implementation falls back to per-question calls.
+        Override in subclass for batching (e.g. CLIProvider).
+        """
+        return [self._query_llm(context, q) for q in questions]
+
     # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
@@ -104,13 +112,11 @@ class JudgeEvaluator(abc.ABC):
                 "hidden_type": hidden_type,
             }
 
-        # Step 5 — query LLM with compressed_text as context
-        test_answers: list[str] = []
-        test_entities: list[set[str]] = []
-        for q in questions:
-            answer = self._query_llm(compressed_text, q)
-            test_answers.append(answer)
-            test_entities.append(self._entities.extract(answer))
+        # Step 5 — query LLM with compressed_text as context.
+        # Batch all questions into a single LLM call to avoid N separate
+        # CLI process launches (~5s each).
+        test_answers = self._query_llm_batch(compressed_text, questions)
+        test_entities = [self._entities.extract(a) for a in test_answers]
 
         # Step 6 — scoring
         semantic_scores = self._embeddings.batch_cosine_similarity(
@@ -165,3 +171,39 @@ class ConcreteJudgeEvaluator(JudgeEvaluator):
         ]
         response = self._provider.chat(messages, max_tokens=256)
         return response.content
+
+    def _query_llm_batch(self, context: str, questions: list[str]) -> list[str]:
+        """Answer all questions in a single LLM call.
+
+        Sends numbered questions, expects numbered answers.
+        Falls back to per-question calls if parsing fails.
+        """
+        if not questions:
+            return []
+        if len(questions) == 1:
+            return [self._query_llm(context, questions[0])]
+
+        numbered = "\n".join(f"{i+1}. {q}" for i, q in enumerate(questions))
+        prompt = (
+            f"Context:\n{context}\n\n"
+            f"Answer each question below in 1-2 sentences. "
+            f"Number your answers to match the questions.\n\n{numbered}"
+        )
+        messages = [{"role": "user", "content": prompt}]
+        response = self._provider.chat(messages, max_tokens=256 * len(questions))
+        raw = response.content.strip()
+
+        # Parse numbered answers: "1. answer\n2. answer\n..."
+        import re
+        answers = re.split(r"\n\s*\d+\.\s*", "\n" + raw)
+        answers = [a.strip() for a in answers if a.strip()]
+
+        if len(answers) == len(questions):
+            return answers
+
+        # Fallback: if parsing failed, use the whole response for each question.
+        logger.warning(
+            "Batch QA parse mismatch: expected %d answers, got %d — falling back",
+            len(questions), len(answers),
+        )
+        return [self._query_llm(context, q) for q in questions]
