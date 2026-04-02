@@ -967,7 +967,7 @@ function fvSelectTab(el) {
 }
 
 function fvFetch(url) {
-  return fetch(url).then(r => {
+  return fetch(url + '?_t=' + Date.now()).then(r => {
     if (!r.ok) return r.text().then(t => { throw new Error(t || r.statusText); });
     return r.text();
   });
@@ -1260,11 +1260,16 @@ class DashboardServer:
             # Look in agent_workspace subdir
             agent_dir = os.path.join(self.run_dir, "agent_workspace")
             path = os.path.join(agent_dir, filename)
+            headers = {"Cache-Control": "no-store"}
             if not os.path.exists(path):
-                return PlainTextResponse(f"# {filename}\n\n(not yet created)", status_code=200)
+                return PlainTextResponse(
+                    f"# {filename}\n\n(not yet created)",
+                    status_code=200,
+                    headers=headers,
+                )
             try:
                 with open(path, "r", encoding="utf-8") as f:
-                    return PlainTextResponse(f.read())
+                    return PlainTextResponse(f.read(), headers=headers)
             except OSError as exc:
                 return PlainTextResponse(f"Error reading file: {exc}", status_code=500)
 
