@@ -451,8 +451,8 @@ class TestFullExperiment3Epochs:
             lines = [l for l in f.readlines() if l.strip()]
         assert len(lines) == 3
 
-    def test_no_artifact_when_below_threshold(self, tmp_path):
-        """No artifact exported when success_rate < pass_threshold."""
+    def test_artifact_exported_even_below_threshold(self, tmp_path):
+        """Artifact is exported every epoch if compress.py exists (regardless of score)."""
         tasks = [_task() for _ in range(5)]
         cfg = BASE_CONFIG
         bm = BudgetManager(cfg)
@@ -469,7 +469,7 @@ class TestFullExperiment3Epochs:
         responses = [_compress_response(i) for i in range(20)]
         provider = MockProvider(responses)
         agent = AgentInterface(cfg, provider, bm, sb, tools)
-        # All tasks fail → success_rate will be 0
+        # All tasks fail → success_rate will be low
         judge = _mock_judge(0.5, False)
         smoke = SmokeTest(sb)
         tc = TokenCounter(cfg)
@@ -484,7 +484,7 @@ class TestFullExperiment3Epochs:
             artifact_manager=am,
         )
         result = runner.run_epoch(epoch=0, tasks=tasks)
-        assert result["artifact_path"] is None
+        assert result["artifact_path"] is not None
 
 
 # ---------------------------------------------------------------------------
@@ -727,8 +727,8 @@ class TestArtifactVersioning:
             prev_oom = result["is_oom"]
 
         non_none = [p for p in artifact_paths if p is not None]
-        assert len(non_none) == 1, "Only epoch 0 should produce an artifact (code unchanged)"
-        assert am.get_latest()["version"] == 1
+        assert len(non_none) == 3, "Artifact exported every epoch (even if unchanged)"
+        assert am.get_latest()["version"] == 3
 
 
 # ---------------------------------------------------------------------------

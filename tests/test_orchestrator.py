@@ -789,11 +789,11 @@ class TestArtifactExport:
             artifact_code = f.read()
         assert artifact_code == expected_code
 
-    def test_no_artifact_when_epoch_fails(self, tmp_path):
-        """Unsuccessful epoch (score < pass_threshold) does not export artifact."""
+    def test_artifact_exported_even_when_epoch_fails(self, tmp_path):
+        """Artifact exported every epoch regardless of score (for inheritance)."""
         config = {
             **BASE_CONFIG,
-            "judge": {**BASE_CONFIG["judge"], "pass_threshold": 0.99},  # very high threshold
+            "judge": {**BASE_CONFIG["judge"], "pass_threshold": 0.99},
         }
         runner = _make_runner(
             n_tasks=1,
@@ -804,7 +804,7 @@ class TestArtifactExport:
             run_dir=str(tmp_path / "run"),
         )
         result = runner.run_epoch(epoch=0, tasks=[_task()])
-        assert result["artifact_path"] is None
+        assert result["artifact_path"] is not None
 
     def test_artifact_filename_includes_score(self, tmp_path):
         config = {

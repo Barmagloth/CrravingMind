@@ -64,6 +64,11 @@ def main() -> None:
         default=None,
         help="Dashboard port (overrides config)",
     )
+    parser.add_argument(
+        "--inherit",
+        default=None,
+        help="Path to a compress.py artifact (or run dir) to inherit from a previous run",
+    )
     args = parser.parse_args()
 
     config = load_config(args.config)
@@ -131,6 +136,47 @@ def main() -> None:
     sandbox = Sandbox(config)
     agent_dir = os.path.join(run_dir, "agent_workspace")
     memory = MemoryManager(config, agent_dir)
+
+    # Inherit compress.py from a previous run.
+    if args.inherit:
+        inherit_path = args.inherit
+        # Accept either a direct .py file or a run directory.
+        if os.path.isdir(inherit_path):
+            # Try artifacts dir first (best artifact), then agent_workspace.
+            art_mgr_tmp = ArtifactManager(os.path.join(inherit_path, "artifacts"))
+            best = art_mgr_tmp.get_best()
+            if best and os.path.exists(best.get("filepath", "")):
+                inherit_path = best["filepath"]
+                logger.info("Inheriting best artifact", extra={"path": inherit_path, "score": best.get("mean_score")})
+            else:
+                ws_path = os.path.join(inherit_path, "agent_workspace", "compress.py")
+                if os.path.exists(ws_path):
+                    inherit_path = ws_path
+                    logger.info("Inheriting compress.py from workspace", extra={"path": ws_path})
+                else:
+                    logger.warning("--inherit dir has no artifacts or compress.py", extra={"path": args.inherit})
+                    inherit_path = None
+
+        if inherit_path and os.path.isfile(inherit_path):
+            with open(inherit_path, "r", encoding="utf-8") as f:
+                inherited_code = f.read()
+            # Strip artifact headers (lines starting with #).
+            lines = inherited_code.split("\n")
+            while lines and lines[0].startswith("# CravingMind Artifact") or (lines and lines[0].startswith("# Epoch:")) or (lines and lines[0].startswith("# Crav:")):
+                lines.pop(0)
+            inherited_code = "\n".join(lines).lstrip("\n")
+            if inherited_code.strip():
+                memory.write_file("compress.py", inherited_code)
+                logger.info("Inherited compress.py loaded (%d chars)", len(inherited_code))
+
+            # Also inherit graveyard if available.
+            if os.path.isdir(args.inherit):
+                graveyard_path = os.path.join(args.inherit, "agent_workspace", "graveyard.md")
+                if os.path.exists(graveyard_path):
+                    with open(graveyard_path, "r", encoding="utf-8") as f:
+                        memory.write_file("graveyard.md", f.read())
+                    logger.info("Inherited graveyard.md")
+
     smoke = SmokeTest(sandbox)
     tools = ToolsRegistry(sandbox, memory, budget, smoke_test=smoke)
     agent = AgentInterface(config, provider, budget, sandbox, tools)

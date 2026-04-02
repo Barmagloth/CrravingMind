@@ -338,10 +338,10 @@ class EpochRunner:
                 extra={"epoch": epoch, "success_rate": combined},
             )
 
-        # Artifact export on successful epoch (not OOM).
+        # Artifact export: save compress.py every epoch (skip on OOM —
+        # compress.py may be in a broken state after rollback).
         artifact_path = None
-        pass_threshold = float(self.config.get("judge", {}).get("pass_threshold", 0.85))
-        if combined >= pass_threshold and not self.budget.is_oom:
+        if completed and not self.budget.is_oom:
             extra = self._compute_export_metadata(completed)
             artifact_path = self._export_artifact(epoch, combined, extra)
 
@@ -531,17 +531,6 @@ class EpochRunner:
             return None
 
         if self.artifact_manager is not None:
-            # Change detection: skip if compress.py hasn't changed since last export.
-            if self._prev_compress_code is not None:
-                if not self.artifact_manager.has_changed(
-                    compress_code, self._prev_compress_code
-                ):
-                    self.logger.info(
-                        "compress.py unchanged — skipping artifact export",
-                        extra={"epoch": epoch},
-                    )
-                    return None
-            self._prev_compress_code = compress_code
 
             crav_id = getattr(self.agent, "crav_id", "Crav-001")
             extra = extra or {}
