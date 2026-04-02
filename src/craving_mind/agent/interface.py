@@ -541,11 +541,8 @@ class AgentInterface:
         """Ask the dying agent for a 1-line epitaph: what it tried, why it failed.
 
         Uses a single LLM call with max_tokens capped low.
-        Returns the agent's text, or "" if budget is exhausted.
+        Free — does NOT consume agent budget (system-level operation).
         """
-        if self.budget.remaining < 50:
-            return ""
-
         msg = (
             "Epoch over. Write ONE short line (max 200 chars) for the graveyard: "
             "what you added/removed in compress.py this epoch and what effect it had. "
@@ -553,17 +550,12 @@ class AgentInterface:
         )
         self.conversation.append({"role": "user", "content": msg})
 
-        # Single shot, no tool loop — cap output hard.
-        max_tokens = min(150, max(1, self.budget.remaining // 4))
         response = self.provider.chat(
             messages=self.conversation,
             tools=[],
             system=self._system_prompt,
-            max_tokens=max_tokens,
+            max_tokens=150,
         )
-
-        step_tokens = response.usage["input_tokens"] + response.usage["output_tokens"]
-        self.budget.spend(step_tokens)
         self.conversation.append({"role": "assistant", "content": response.content})
 
         # Return just the text, stripped of any JSON wrapper.
