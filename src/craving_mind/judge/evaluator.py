@@ -182,7 +182,8 @@ class ConcreteJudgeEvaluator(JudgeEvaluator):
         """Answer all questions in a single LLM call.
 
         Sends numbered questions, expects numbered answers.
-        Falls back to per-question calls if parsing fails.
+        If parsing yields fewer answers than expected, pads with the
+        raw response text (still better than N individual CLI calls).
         Resets CLI session first so no previous context bleeds in.
         """
         if not questions:
@@ -195,23 +196,45 @@ class ConcreteJudgeEvaluator(JudgeEvaluator):
         prompt = (
             f"Context:\n{context}\n\n"
             f"Answer each question below in 1-2 sentences. "
-            f"Number your answers to match the questions.\n\n{numbered}"
+            f"Format: number followed by period, then answer. "
+            f"Example:\n1. First answer here.\n2. Second answer here.\n\n{numbered}"
         )
         messages = [{"role": "user", "content": prompt}]
         response = self._provider.chat(messages, max_tokens=256 * len(questions))
         raw = response.content.strip()
 
+        # Strip JSON wrapper if CLI provider wrapped the response.
+        if raw.startswith("{"):
+            try:
+                import json
+                data = json.loads(raw)
+                raw = data.get("content", raw)
+            except (ValueError, AttributeError):
+                pass
+
         # Parse numbered answers: "1. answer\n2. answer\n..."
         import re
-        answers = re.split(r"\n\s*\d+\.\s*", "\n" + raw)
+        answers = re.split(r"\n\s*\d+[\.\)]\s*", "\n" + raw)
         answers = [a.strip() for a in answers if a.strip()]
 
-        if len(answers) == len(questions):
+        if len(answers) >= len(questions):
+            return answers[: len(questions)]
+
+        if answers:
+            # Partial match: pad missing answers with the full raw response.
+            # This avoids N separate CLI calls (~5s each) while still giving
+            # the scorer something to work with for unparsed questions.
+            logger.warning(
+                "Batch QA partial parse: expected %d, got %d — padding remainder",
+                len(questions), len(answers),
+            )
+            while len(answers) < len(questions):
+                answers.append(raw)
             return answers
 
-        # Fallback: if parsing failed, use the whole response for each question.
+        # No numbered answers found at all — use raw text for every question.
         logger.warning(
-            "Batch QA parse mismatch: expected %d answers, got %d — falling back",
-            len(questions), len(answers),
+            "Batch QA: no numbered answers parsed — using raw response for all %d questions",
+            len(questions),
         )
-        return [self._query_llm(context, q) for q in questions]
+        return [raw] * len(questions)

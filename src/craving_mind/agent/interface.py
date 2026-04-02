@@ -407,11 +407,21 @@ class CLIProvider(LLMProvider):
                                                   else vars(msg.usage))
                             if msg.session_id:
                                 self._session_id = msg.session_id
+                    total_chars = sum(len(t) for t in collected_text)
                     logger.info(
                         "CLIProvider: response received, total_chars=%d (~%d tokens)",
-                        sum(len(t) for t in collected_text),
-                        max(1, sum(len(t) for t in collected_text) // 4),
+                        total_chars,
+                        max(1, total_chars // 4),
                     )
+                    if total_chars == 0 and attempt < MAX_RETRIES - 1:
+                        logger.warning(
+                            "CLIProvider: empty response on attempt %d/%d — retrying",
+                            attempt + 1, MAX_RETRIES,
+                        )
+                        # Drop session so next attempt starts fresh.
+                        self._session_id = None
+                        await asyncio.sleep(INITIAL_BACKOFF)
+                        continue
                     return  # success — exit retry loop
                 except Exception as e:
                     error_str = str(e).lower()
@@ -517,7 +527,16 @@ class AgentInterface:
         The agent never sees the source text — only numerical feedback.
         It gets a turn to read/write files and run scripts to improve
         compress.py based on the metrics.
+
+        Conversation is trimmed to the last assistant summary before each
+        new task to prevent unbounded prompt growth across tasks.
         """
+        # Trim conversation: keep only the last assistant message (if any)
+        # so the agent has minimal context. It can always read_file to
+        # refresh its knowledge. This prevents prompt_len from growing
+        # 4k→7k+ across tasks, eating the entire budget.
+        self._trim_to_last_summary()
+
         pulse = self.budget.pulse_string()
         msg = (
             f"{pulse}\n\n"
@@ -529,6 +548,33 @@ class AgentInterface:
         )
         self.conversation.append({"role": "user", "content": msg})
         return self._run_turn()
+
+    def _trim_to_last_summary(self) -> None:
+        """Keep only the last assistant message in conversation.
+
+        Between tasks, the conversation accumulates tool results (read_file
+        echoes full compress.py ~5000 chars) and multiple round-trips.
+        By task 6, prompt_len can hit 7600+ tokens — most of the budget.
+
+        Trimming to just the last assistant summary gives the agent a
+        one-line reminder of what happened, while keeping prompt small.
+        """
+        if len(self.conversation) <= 2:
+            return
+
+        # Find last assistant message.
+        last_assistant = None
+        for msg in reversed(self.conversation):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", "")
+                # Truncate to 200 chars — just a summary, not full tool output.
+                last_assistant = {"role": "assistant", "content": content[:200]}
+                break
+
+        if last_assistant:
+            self.conversation = [last_assistant]
+        else:
+            self.conversation = []
 
     def request_rnd(self) -> dict:
         """Ask Crav to do R&D (analyze results, update compress.py)."""
@@ -572,20 +618,23 @@ class AgentInterface:
 
     # Maximum LLM round-trips per _run_turn call (read → fix → compress → done).
     _MAX_TOOL_ROUNDS = 6
+    # Maximum fraction of remaining budget a single _run_turn may consume.
+    _MAX_TURN_BUDGET_FRACTION = 0.35
 
     def _run_turn(self) -> dict:
         """Execute one turn with a tool-use loop.
 
         The agent may need several LLM round-trips to accomplish a task
         (e.g. read_file → write_file → run_compress).  We loop until the
-        model stops requesting tools, the budget runs out, or we hit
-        _MAX_TOOL_ROUNDS to prevent runaway spending.
+        model stops requesting tools, the budget runs out, we hit
+        _MAX_TOOL_ROUNDS, or this turn consumed >35% of remaining budget.
         """
         all_tool_calls: list = []
         all_tool_results: list = []
         total_tokens = 0
         final_content = ""
         alive = True
+        turn_budget_cap = int(self.budget.remaining * self._MAX_TURN_BUDGET_FRACTION)
 
         for _round in range(self._MAX_TOOL_ROUNDS):
             max_tokens = max(1, min(4096, self.budget.remaining // 4))
@@ -619,15 +668,30 @@ class AgentInterface:
                     "name": tc["name"],
                     "result": result,
                 })
+                # Truncate large tool results to save context window.
+                # read_file returns full file content (~5000 chars for compress.py)
+                # which bloats the conversation across tasks.
+                result_str = json.dumps(result)
+                if len(result_str) > 3000:
+                    result_str = result_str[:3000] + '..."}'
                 tool_result_contents.append({
                     "type": "tool_result",
                     "tool_use_id": tc["id"],
-                    "content": json.dumps(result),
+                    "content": result_str,
                 })
             self.conversation.append({"role": "user", "content": tool_result_contents})
 
             if not alive:
                 # Budget exhausted — stop looping.
+                break
+
+            # Per-turn circuit breaker: stop if this turn already consumed
+            # a large fraction of the budget (prevents runaway tool loops).
+            if total_tokens > turn_budget_cap:
+                logger.info(
+                    "Turn budget cap reached (%d > %d) — stopping tool loop",
+                    total_tokens, turn_budget_cap,
+                )
                 break
 
         return {

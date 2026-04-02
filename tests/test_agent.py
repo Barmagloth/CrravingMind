@@ -436,6 +436,73 @@ class TestAgentInterface:
         last_call = provider.call_history[-1]
         assert last_call["system"] == "You are Crav."
 
+    def test_send_metrics_trims_conversation(self, interface, provider):
+        """send_metrics resets conversation to prevent unbounded growth."""
+        # Simulate a prior task filling up conversation.
+        interface.conversation = [
+            {"role": "user", "content": "old metrics msg"},
+            {"role": "assistant", "content": "I read the file and made changes"},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tc_001", "content": '{"content": "' + 'x' * 5000 + '"}'}]},
+            {"role": "assistant", "content": "Done improving"},
+        ]
+        assert len(interface.conversation) == 4
+
+        interface.send_metrics(
+            task_idx=2, tasks_total=5,
+            feedback={"compression_ratio": 0.4, "semantic_score": 0.9, "entity_score": 0.8, "pass": True},
+        )
+        # After send_metrics: trimmed to last_assistant + new user msg + new assistant response.
+        # Should be much smaller than 4 + 2 = 6.
+        assert len(interface.conversation) <= 4
+
+    def test_trim_to_last_summary_empty_conversation(self, interface):
+        """Trimming an empty conversation is a no-op."""
+        interface.conversation = []
+        interface._trim_to_last_summary()
+        assert interface.conversation == []
+
+    def test_trim_to_last_summary_keeps_last_assistant(self, interface):
+        """Trimming keeps only the last assistant message, truncated."""
+        interface.conversation = [
+            {"role": "user", "content": "msg 1"},
+            {"role": "assistant", "content": "response 1"},
+            {"role": "user", "content": "msg 2"},
+            {"role": "assistant", "content": "response 2 that is longer"},
+        ]
+        interface._trim_to_last_summary()
+        assert len(interface.conversation) == 1
+        assert interface.conversation[0]["role"] == "assistant"
+        assert "response 2" in interface.conversation[0]["content"]
+
+    def test_turn_budget_cap_stops_loop(self, mock_sandbox, memory):
+        """Per-turn budget cap prevents runaway tool loops."""
+        config = {**BASE_CONFIG, "budget": {**BASE_CONFIG["budget"], "base_tokens": 1000}}
+        bm = BudgetManager(config)
+        bm.start_epoch(1)
+
+        # Each round costs 300 tokens → 35% of 1000 = 350, so after round 2 (600 total) it should stop.
+        tool_response = LLMResponse(
+            content="",
+            tool_calls=[{"id": "tc_001", "name": "audit_budget", "arguments": {}}],
+            usage={"input_tokens": 200, "output_tokens": 100},
+            stop_reason="tool_use",
+        )
+        end_response = LLMResponse(
+            content="done",
+            tool_calls=[],
+            usage={"input_tokens": 50, "output_tokens": 20},
+            stop_reason="end_turn",
+        )
+        # Provide many tool responses — cap should cut it short.
+        prov = MockProvider([tool_response, tool_response, tool_response, tool_response, end_response])
+        registry = ToolsRegistry(mock_sandbox, memory, bm)
+        iface = AgentInterface(config, prov, bm, mock_sandbox, registry)
+        iface.start_epoch(1, "sys")
+
+        result = iface.send_task("text", 0.5)
+        # Should have stopped before using all 4 tool responses.
+        assert result["tokens_spent"] < 1200  # didn't run all 4 rounds
+
 
 # ---------------------------------------------------------------------------
 # CLIProvider

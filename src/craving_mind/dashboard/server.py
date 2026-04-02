@@ -527,7 +527,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div id="file-viewer" class="panel" style="padding:0; border-top: 2px solid var(--accent);">
     <div style="padding: 10px 12px 0;">
       <div class="fv-header">
-        <span class="fv-tab active" data-file="compress.py" onclick="fvSelectTab(this)">compress.py</span>
+        <span class="fv-tab active" data-file="compress.py" onclick="fvSelectTab(this)">compress.py <span id="fv-ver-compress" style="font-size:10px;opacity:0.6"></span></span>
         <span class="fv-tab" data-file="bible.md" onclick="fvSelectTab(this)">bible.md</span>
         <span class="fv-tab" data-file="graveyard.md" onclick="fvSelectTab(this)">graveyard.md</span>
         <span class="fv-tab" data-file="artifact" onclick="fvSelectTab(this)">Artifact</span>
@@ -586,6 +586,9 @@ let fvCurrentFile = 'compress.py';
 let fvAutoTimer = null;
 let fvCollapsed = false;
 let artifactVersions = [];
+// Track content hashes per file to detect actual changes.
+const fvHashes = {};     // filename → last seen hash
+const fvVersions = {};   // filename → version counter (1-based)
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -969,7 +972,8 @@ function fvSelectTab(el) {
 function fvFetch(url) {
   return fetch(url + '?_t=' + Date.now()).then(r => {
     if (!r.ok) return r.text().then(t => { throw new Error(t || r.statusText); });
-    return r.text();
+    const hash = r.headers.get('X-Content-Hash') || '';
+    return r.text().then(txt => ({ txt, hash }));
   });
 }
 
@@ -978,8 +982,30 @@ function fvRefresh() {
     fvLoadArtifact();
   } else {
     fvFetch('/api/files/' + fvCurrentFile)
-      .then(txt => fvDisplay(txt, fvCurrentFile))
+      .then(({txt, hash}) => {
+        fvTrackVersion(fvCurrentFile, hash);
+        fvDisplay(txt, fvCurrentFile);
+      })
       .catch(e => fvDisplay('(waiting for server…)', 'txt'));
+  }
+}
+
+function fvTrackVersion(filename, hash) {
+  if (!hash) return;
+  const prev = fvHashes[filename];
+  if (prev === undefined) {
+    // First load: initialise at v1.
+    fvHashes[filename] = hash;
+    fvVersions[filename] = 1;
+  } else if (prev !== hash) {
+    // Content changed — bump version.
+    fvHashes[filename] = hash;
+    fvVersions[filename] = (fvVersions[filename] || 1) + 1;
+  }
+  // Update the badge on the compress.py tab.
+  if (filename === 'compress.py') {
+    const badge = document.getElementById('fv-ver-compress');
+    if (badge) badge.textContent = 'v' + (fvVersions[filename] || 1);
   }
 }
 
@@ -988,7 +1014,7 @@ function fvLoadArtifact() {
   const ver = sel.value;
   if (!ver) { fvDisplay('No artifacts exported yet.', 'txt'); return; }
   fvFetch('/api/artifacts/' + ver)
-    .then(txt => fvDisplay(txt, 'compress.py'))
+    .then(({txt}) => fvDisplay(txt, 'compress.py'))
     .catch(e => fvDisplay('Artifact not available: ' + e.message, 'txt'));
 }
 
@@ -1035,10 +1061,18 @@ function fvToggle() {
   document.querySelector('.collapse-btn').textContent = fvCollapsed ? '▶' : '▼';
 }
 
-// Auto-refresh
+// Auto-refresh: refresh current tab content.
 setInterval(() => {
   if (document.getElementById('fv-auto-refresh').checked) fvRefresh();
 }, 5000);
+
+// Always poll compress.py hash so the version badge updates
+// even when viewing another tab.
+setInterval(() => {
+  fetch('/api/files/compress.py?_t=' + Date.now())
+    .then(r => { fvTrackVersion('compress.py', r.headers.get('X-Content-Hash') || ''); })
+    .catch(() => {});
+}, 4000);
 
 // ============================================================
 // Syntax Highlighting: Markdown
@@ -1253,7 +1287,13 @@ class DashboardServer:
 
         @app.get("/api/files/{filename}")
         async def file_content(filename: str):
-            """Return contents of bible.md, graveyard.md, or compress.py."""
+            """Return contents of bible.md, graveyard.md, or compress.py.
+
+            Returns an X-Content-Hash header (first 12 hex of SHA-256)
+            so the dashboard can detect when a file actually changes and
+            bump its visual version counter.
+            """
+            import hashlib
             allowed = {"bible.md", "graveyard.md", "compress.py"}
             if filename not in allowed:
                 return PlainTextResponse("File not found.", status_code=404)
@@ -1262,14 +1302,18 @@ class DashboardServer:
             path = os.path.join(agent_dir, filename)
             headers = {"Cache-Control": "no-store"}
             if not os.path.exists(path):
+                body = f"# {filename}\n\n(not yet created)"
+                headers["X-Content-Hash"] = hashlib.sha256(body.encode()).hexdigest()[:12]
                 return PlainTextResponse(
-                    f"# {filename}\n\n(not yet created)",
+                    body,
                     status_code=200,
                     headers=headers,
                 )
             try:
                 with open(path, "r", encoding="utf-8") as f:
-                    return PlainTextResponse(f.read(), headers=headers)
+                    content = f.read()
+                headers["X-Content-Hash"] = hashlib.sha256(content.encode()).hexdigest()[:12]
+                return PlainTextResponse(content, headers=headers)
             except OSError as exc:
                 return PlainTextResponse(f"Error reading file: {exc}", status_code=500)
 
