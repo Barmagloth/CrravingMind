@@ -359,7 +359,16 @@ class CLIProvider(LLMProvider):
             )
 
         messages = self._trim_conversation(messages)
-        prompt = self._build_prompt(messages, tools, system)
+
+        # On resumed sessions the model already has system prompt and tool
+        # definitions from the first call.  Re-sending them wastes ~900
+        # tokens per call (system ~500 + tools ~400).  Only include them
+        # on the very first call (no session_id yet).
+        if self._session_id is not None:
+            prompt = self._build_prompt(messages, tools=None, system="")
+        else:
+            prompt = self._build_prompt(messages, tools, system)
+
         logger.info(
             "CLIProvider.chat: prompt_len=%d max_tokens=%d session_id=%s",
             len(prompt), max_tokens, self._session_id,
@@ -588,20 +597,31 @@ class AgentInterface:
 
         Uses a single LLM call with max_tokens capped low.
         Free — does NOT consume agent budget (system-level operation).
+
+        Only sends the last 2 conversation messages (not the entire epoch
+        history) to avoid wasting 5-20k tokens on input for a 1-line reply.
         """
         msg = (
             "Epoch over. Write ONE short line (max 200 chars) for the graveyard: "
             "what you added/removed in compress.py this epoch and what effect it had. "
             "No tools, just text."
         )
-        self.conversation.append({"role": "user", "content": msg})
+        # Minimal context: last assistant message + the epitaph request.
+        # No need to send full epoch history for a 1-line summary.
+        minimal_msgs: list[dict] = []
+        for m in reversed(self.conversation):
+            if m.get("role") == "assistant":
+                minimal_msgs.append({"role": "assistant", "content": m["content"][:300]})
+                break
+        minimal_msgs.append({"role": "user", "content": msg})
 
         response = self.provider.chat(
-            messages=self.conversation,
+            messages=minimal_msgs,
             tools=[],
             system=self._system_prompt,
             max_tokens=150,
         )
+        self.conversation.append({"role": "user", "content": msg})
         self.conversation.append({"role": "assistant", "content": response.content})
 
         # Return just the text, stripped of any JSON wrapper.

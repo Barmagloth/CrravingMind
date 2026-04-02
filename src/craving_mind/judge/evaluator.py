@@ -200,7 +200,7 @@ class ConcreteJudgeEvaluator(JudgeEvaluator):
             f"Example:\n1. First answer here.\n2. Second answer here.\n\n{numbered}"
         )
         messages = [{"role": "user", "content": prompt}]
-        response = self._provider.chat(messages, max_tokens=256 * len(questions))
+        response = self._provider.chat(messages, max_tokens=120 * len(questions))
         raw = response.content.strip()
 
         # Strip JSON wrapper if CLI provider wrapped the response.
