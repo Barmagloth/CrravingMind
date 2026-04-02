@@ -598,30 +598,22 @@ class AgentInterface:
         Uses a single LLM call with max_tokens capped low.
         Free — does NOT consume agent budget (system-level operation).
 
-        Only sends the last 2 conversation messages (not the entire epoch
-        history) to avoid wasting 5-20k tokens on input for a 1-line reply.
+        The model already remembers the entire epoch via CLI session resume —
+        just send the bare request as the next conversation turn.
         """
         msg = (
             "Epoch over. Write ONE short line (max 200 chars) for the graveyard: "
             "what you added/removed in compress.py this epoch and what effect it had. "
             "No tools, just text."
         )
-        # Minimal context: last assistant message + the epitaph request.
-        # No need to send full epoch history for a 1-line summary.
-        minimal_msgs: list[dict] = []
-        for m in reversed(self.conversation):
-            if m.get("role") == "assistant":
-                minimal_msgs.append({"role": "assistant", "content": m["content"][:300]})
-                break
-        minimal_msgs.append({"role": "user", "content": msg})
+        self.conversation.append({"role": "user", "content": msg})
 
         response = self.provider.chat(
-            messages=minimal_msgs,
+            messages=self.conversation,
             tools=[],
-            system=self._system_prompt,
+            system="",
             max_tokens=150,
         )
-        self.conversation.append({"role": "user", "content": msg})
         self.conversation.append({"role": "assistant", "content": response.content})
 
         # Return just the text, stripped of any JSON wrapper.
