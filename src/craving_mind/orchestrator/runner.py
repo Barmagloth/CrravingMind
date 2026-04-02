@@ -430,12 +430,17 @@ class EpochRunner:
         allowed = self.config.get("sandbox", {}).get("allowed_imports", [])
         allowed_imports = ", ".join(allowed) if allowed else "(none configured)"
 
+        # Bible section: only shown in Phase 2+.
+        bible_key = f"bible_phase{phase}"
+        bible_section = prompt_cfg.get(bible_key, "").strip()
+
         return template.format(
             crav_name=crav_name,
             epoch=epoch,
             phase_description=phase_descriptions.get(phase, ""),
             allowed_imports=allowed_imports,
             graveyard_section=graveyard_section,
+            bible_section=bible_section,
         )
 
     def _load_prompt_config(self) -> dict:
