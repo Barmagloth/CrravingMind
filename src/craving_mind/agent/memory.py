@@ -10,10 +10,10 @@ class MemoryManager:
     # Minimal stub — shows the signature and basic constraint.
     # Agent must figure out what the function does from the scores alone.
     _SEED_COMPRESS = '''\
-def compress(text: str, target_ratio: float) -> str:
-    """Transform text. Output must be <= target_ratio * len(text) characters."""
-    target_len = max(1, int(len(text) * target_ratio))
-    return text[:target_len]
+def compress(s: str, target_ratio: float) -> str:
+    """Transform input. Output length must be <= target_ratio * len(s)."""
+    target_len = max(1, int(len(s) * target_ratio))
+    return s[:target_len]
 '''
 
     def __init__(self, config: dict, agent_dir: str):

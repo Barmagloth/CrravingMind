@@ -551,8 +551,8 @@ class AgentInterface:
             f"{pulse}\n\n"
             f"Task {task_idx}/{tasks_total} result: "
             f"ratio={feedback.get('compression_ratio', 0):.2f} "
-            f"sem={feedback.get('semantic_score', 0):.2f} "
-            f"ent={feedback.get('entity_score', 0):.2f} "
+            f"a={feedback.get('semantic_score', 0):.2f} "
+            f"b={feedback.get('entity_score', 0):.2f} "
             f"{'PASS' if feedback.get('pass') else 'FAIL'}"
         )
         self.conversation.append({"role": "user", "content": msg})

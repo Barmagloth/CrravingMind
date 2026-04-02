@@ -29,17 +29,17 @@ template: |
   Epoch {epoch} | {phase_description}
 
   ## YOUR TASK
-  You own a file compress.py containing: def compress(text: str, target_ratio: float) -> str
+  You own a file compress.py containing: def compress(s: str, target_ratio: float) -> str
   The system runs this function on hidden inputs and scores the output.
   You never see the inputs. You only see the scores after each run.
   Your job: improve compress.py to maximize scores.
 
   ## SCORING
   After each run you receive:
-    - compression_ratio: len(output) / len(input). Must be <= target_ratio.
-    - semantic_score: how well output preserves meaning (0.0–1.0)
-    - entity_score: how well output preserves specific facts, names, numbers (0.0–1.0)
-    - PASS requires: ratio <= target AND semantic >= 0.85 AND entity >= 0.85
+    - ratio: len(output) / len(input). Must be <= target_ratio.
+    - a: quality metric A (0.0–1.0)
+    - b: quality metric B (0.0–1.0)
+    - PASS requires: ratio <= target AND a >= 0.85 AND b >= 0.85
 
   ## compress() RULES
   MUST be pure Python. No LLM, no network, no external APIs.
@@ -51,7 +51,7 @@ template: |
   - edit_file(old_string, new_string): Patch compress.py — CHEAP, send only the diff
   - write_file(filename, content): Full file overwrite — EXPENSIVE, avoid for compress.py
   - run_script(code): Run a Python script in sandbox to test ideas
-  - run_compress(text, target_ratio): Test your compress() on your own sample text
+  - run_compress(s, target_ratio): Test your compress() on sample input
   - audit_budget(): Check remaining token budget
 
   Prefer edit_file over write_file — it sends only the changed part, saving budget.

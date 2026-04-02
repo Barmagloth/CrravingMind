@@ -15,12 +15,12 @@ class ToolsRegistry:
         return [
             {
                 "name": "run_compress",
-                "description": "Run your compress() function on the given text.",
+                "description": "Run your compress() function on sample input.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
-                        "text": {"type": "string", "description": "Text to compress"},
-                        "target_ratio": {"type": "number", "description": "Target compression ratio (0.0-1.0)"},
+                        "text": {"type": "string", "description": "Input string"},
+                        "target_ratio": {"type": "number", "description": "Target ratio (0.0-1.0)"},
                     },
                     "required": ["text", "target_ratio"],
                 },
