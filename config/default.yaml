@@ -10,7 +10,7 @@ phases:
   phase3_start: 26
 
 budget:
-  base_tokens: 20000
+  base_tokens: 10000
   circuit_breaker_pct: 0.15
   venture_decay: 0.5
   rnd_lambda: 0.0001
