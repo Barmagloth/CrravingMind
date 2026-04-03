@@ -675,17 +675,17 @@ class TestCLIProvider:
         assert "import re" in calls[0]["arguments"]["content"]
         assert "def compress" in calls[0]["arguments"]["content"]
 
-    def test_build_prompt_includes_system(self):
+    def test_build_system_suffix_includes_system(self):
         p = CLIProvider()
-        prompt = p._build_prompt([], None, system="You are Crav.")
-        assert "You are Crav." in prompt
+        suffix = p._build_system_suffix(None, system="You are Crav.")
+        assert "You are Crav." in suffix
 
-    def test_build_prompt_includes_tool_definitions(self):
+    def test_build_system_suffix_includes_tool_definitions(self):
         p = CLIProvider()
         tools = [{"name": "run_compress", "description": "compress text"}]
-        prompt = p._build_prompt([], tools, system="")
-        assert "run_compress" in prompt
-        assert "tool_calls" in prompt
+        suffix = p._build_system_suffix(tools, system="")
+        assert "run_compress" in suffix
+        assert "tool_calls" in suffix
 
     def test_build_prompt_includes_messages(self):
         p = CLIProvider()

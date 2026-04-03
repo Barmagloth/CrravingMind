@@ -15,6 +15,7 @@ try:
     from claude_code_sdk import ClaudeCodeOptions as _SdkOptions
     from claude_code_sdk.types import AssistantMessage as _AssistantMessage
     from claude_code_sdk.types import TextBlock as _TextBlock
+    from claude_code_sdk.types import ToolUseBlock as _ToolUseBlock
     from claude_code_sdk.types import ResultMessage as _ResultMessage
     _SDK_AVAILABLE = True
 except ImportError:
@@ -22,6 +23,7 @@ except ImportError:
     _SdkOptions = None  # type: ignore[assignment]
     _AssistantMessage = None  # type: ignore[assignment]
     _TextBlock = None  # type: ignore[assignment]
+    _ToolUseBlock = None  # type: ignore[assignment]
     _ResultMessage = None  # type: ignore[assignment]
     _SDK_AVAILABLE = False
 
@@ -165,14 +167,17 @@ class CLIProvider(LLMProvider):
         """Drop the current session so the next call starts fresh."""
         self._session_id = None
 
-    def _build_prompt(
-        self, messages: list, tools: list | None, system: str
-    ) -> str:
-        """Format the full conversation + tool spec into one prompt string."""
+    def _build_system_suffix(self, tools: list | None, system: str) -> str:
+        """Build the system prompt suffix (tools + app system prompt).
+
+        This goes into append_system_prompt so the model treats it as
+        system-level instructions, not as user input (which it may
+        reject as prompt injection).
+        """
         parts: list[str] = []
 
         if system:
-            parts.append(f"[SYSTEM]\n{system}\n[/SYSTEM]\n")
+            parts.append(system)
 
         if tools:
             tool_specs = json.dumps(tools, indent=2)
@@ -188,9 +193,21 @@ class CLIProvider(LLMProvider):
             )
         else:
             parts.append(
-                "Respond ONLY with a JSON object: "
+                "Always respond with a JSON object: "
                 '{"content": "<your reply>", "tool_calls": []}\n'
             )
+
+        return "\n\n".join(parts)
+
+    def _build_prompt(
+        self, messages: list, tools: list | None, system: str
+    ) -> str:
+        """Format conversation messages into one prompt string.
+
+        System prompt and tool definitions are sent separately via
+        append_system_prompt (see _build_system_suffix).
+        """
+        parts: list[str] = []
 
         for msg in messages:
             role = msg["role"].upper()
@@ -209,7 +226,9 @@ class CLIProvider(LLMProvider):
                 content = "\n".join(text_parts)
             parts.append(f"[{role}]\n{content}")
 
-        parts.append("[ASSISTANT]")
+        if not parts:
+            parts.append("[USER]\n(awaiting instructions)")
+
         return "\n\n".join(parts)
 
     def _trim_conversation(self, messages: list, max_chars: int = 20000) -> list:
@@ -227,6 +246,25 @@ class CLIProvider(LLMProvider):
             else:
                 break
         return trimmed
+
+    @staticmethod
+    def _extract_from_structured(data: dict) -> tuple[str, list]:
+        """Extract (content, tool_calls) from a StructuredOutput dict.
+
+        The --json-schema flag makes the model respond via a StructuredOutput
+        tool call whose input is already a validated dict matching our schema.
+        No JSON parsing needed.
+        """
+        content = data.get("content", "")
+        raw_calls = data.get("tool_calls", [])
+        tool_calls = []
+        for i, tc in enumerate(raw_calls):
+            tool_calls.append({
+                "id": f"cli_{i:04d}",
+                "name": tc.get("name", ""),
+                "arguments": tc.get("arguments", {}),
+            })
+        return content, tool_calls
 
     def _parse_response(self, raw_text: str) -> tuple[str, list]:
         """Extract (content, tool_calls) from the model's response text.
@@ -440,9 +478,11 @@ class CLIProvider(LLMProvider):
         # on the very first call (no session_id yet).
         is_resumed = self._session_id is not None
         if is_resumed:
+            system_suffix = ""
             prompt = self._build_prompt(messages, tools=None, system="")
         else:
-            prompt = self._build_prompt(messages, tools, system)
+            system_suffix = self._build_system_suffix(tools, system)
+            prompt = self._build_prompt(messages, tools=None, system="")
 
         logger.info(
             "CLIProvider.chat: prompt_len=%d max_tokens=%d session_id=%s",
@@ -451,7 +491,7 @@ class CLIProvider(LLMProvider):
 
         # Remove CLAUDECODE so we can run nested from within a Claude Code session.
         env = {k: v for k, v in os.environ.items() if k != "CLAUDECODE"}
-        options = _SdkOptions(
+        sdk_kwargs = dict(
             model=self.model,
             allowed_tools=[],         # no filesystem tools — text-only
             permission_mode="bypassPermissions",
@@ -461,17 +501,22 @@ class CLIProvider(LLMProvider):
                 "json-schema": json.dumps(self._RESPONSE_SCHEMA),
             },
         )
+        if system_suffix:
+            sdk_kwargs["append_system_prompt"] = system_suffix
+        options = _SdkOptions(**sdk_kwargs)
 
         MAX_RETRIES = 5
         INITIAL_BACKOFF = 2.0
 
         collected_text: list[str] = []
+        structured_data: dict | None = None  # From StructuredOutput tool use
         usage_data: dict = {}
 
         async def _run() -> None:
             nonlocal usage_data
             for attempt in range(MAX_RETRIES):
                 collected_text.clear()
+                structured_data = None
                 usage_data.clear()
                 try:
                     logger.debug(
@@ -488,6 +533,12 @@ class CLIProvider(LLMProvider):
                                     logger.debug(
                                         "CLIProvider: text chunk %d chars", len(block.text)
                                     )
+                                elif (_ToolUseBlock and isinstance(block, _ToolUseBlock)
+                                      and block.name == "StructuredOutput"):
+                                    structured_data = block.input
+                                    logger.debug(
+                                        "CLIProvider: StructuredOutput block received"
+                                    )
                         elif _ResultMessage and isinstance(msg, _ResultMessage):
                             if msg.usage:
                                 usage_data.update(msg.usage if isinstance(msg.usage, dict)
@@ -496,11 +547,12 @@ class CLIProvider(LLMProvider):
                                 self._session_id = msg.session_id
                     total_chars = sum(len(t) for t in collected_text)
                     logger.info(
-                        "CLIProvider: response received, total_chars=%d (~%d tokens)",
+                        "CLIProvider: response received, total_chars=%d (~%d tokens)%s",
                         total_chars,
                         max(1, total_chars // 4),
+                        " [structured]" if structured_data else "",
                     )
-                    if total_chars == 0 and attempt < MAX_RETRIES - 1:
+                    if total_chars == 0 and structured_data is None and attempt < MAX_RETRIES - 1:
                         logger.warning(
                             "CLIProvider: empty response on attempt %d/%d — retrying",
                             attempt + 1, MAX_RETRIES,
@@ -531,12 +583,22 @@ class CLIProvider(LLMProvider):
 
         asyncio.run(_run())
 
-        raw_text = "".join(collected_text)
-        content, tool_calls = self._parse_response(raw_text)
-        logger.debug(
-            "CLIProvider: parsed content_len=%d tool_calls=%d",
-            len(content), len(tool_calls),
-        )
+        # Prefer structured output (from --json-schema StructuredOutput tool)
+        # over text parsing — it's already a validated dict.
+        if structured_data is not None:
+            content, tool_calls = self._extract_from_structured(structured_data)
+            raw_text = json.dumps(structured_data)
+            logger.debug(
+                "CLIProvider: structured output content_len=%d tool_calls=%d",
+                len(content), len(tool_calls),
+            )
+        else:
+            raw_text = "".join(collected_text)
+            content, tool_calls = self._parse_response(raw_text)
+            logger.debug(
+                "CLIProvider: parsed content_len=%d tool_calls=%d",
+                len(content), len(tool_calls),
+            )
 
         # Estimate token usage from text length if SDK didn't report it.
         # The CLI SDK rarely reports input_tokens, so we estimate from the
