@@ -124,6 +124,9 @@ class ToolsRegistry:
             filename = arguments["filename"]
             content = arguments["content"]
 
+            if filename == "bible.md" and self._phase < 2:
+                return {"error": "bible.md is not available in Phase 1."}
+
             if filename == "compress.py":
                 # 1. Validate imports before writing.
                 ok, err = self.sandbox.validate_imports(content)

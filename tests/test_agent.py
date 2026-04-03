@@ -336,9 +336,15 @@ class TestToolsRegistry:
     def test_execute_write_non_compress_skips_validation(self, mock_sandbox, memory, budget):
         # validate_imports should NOT be called for bible.md
         registry = ToolsRegistry(mock_sandbox, memory, budget)
+        registry._phase = 2  # bible.md requires phase >= 2
         registry.execute("write_file", {"filename": "bible.md", "content": "some notes"})
         mock_sandbox.validate_imports.assert_not_called()
         assert memory.read_file("bible.md") == "some notes"
+
+    def test_write_bible_blocked_phase1(self, mock_sandbox, memory, budget):
+        registry = ToolsRegistry(mock_sandbox, memory, budget)
+        result = registry.execute("write_file", {"filename": "bible.md", "content": "x"})
+        assert "error" in result
 
     def test_execute_run_compress(self, registry, mock_sandbox, memory):
         memory.write_file("compress.py", "def compress(t, r): return t")
