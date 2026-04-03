@@ -751,7 +751,7 @@ class AgentInterface:
         turn_budget_cap = int(self.budget.remaining * self._MAX_TURN_BUDGET_FRACTION)
 
         for _round in range(self._MAX_TOOL_ROUNDS):
-            max_tokens = max(512, min(4096, self.budget.remaining // 4))
+            max_tokens = max(1, min(4096, self.budget.remaining // 4))
 
             response = self.provider.chat(
                 messages=self.conversation,

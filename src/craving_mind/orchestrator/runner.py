@@ -107,7 +107,7 @@ class EpochRunner:
             if ctrl.get("stopped"):
                 self.logger.info("[Epoch %d] Stop signal — finishing epoch early", epoch)
                 break
-            while ctrl.get("paused"):
+            while ctrl.get("paused") and not ctrl.get("stopped"):
                 import time
                 time.sleep(1)
                 ctrl = self._read_control()
