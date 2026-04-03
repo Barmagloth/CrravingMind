@@ -136,9 +136,10 @@ class TestValidateImports:
         assert ok
         assert err == ""
 
-    def test_allowed_numpy_passes(self, sandbox):
+    def test_numpy_forbidden(self, sandbox):
         ok, err = sandbox.validate_imports(NUMPY_COMPRESS)
-        assert ok
+        assert not ok
+        assert "numpy" in err
 
     def test_no_imports_passes(self, sandbox):
         ok, err = sandbox.validate_imports(SIMPLE_COMPRESS)
@@ -236,9 +237,9 @@ class TestRunCompress:
         assert not result.success
         assert "SyntaxError" in result.error
 
-    def test_numpy_compress_works(self, sandbox):
+    def test_numpy_compress_blocked(self, sandbox):
         result = sandbox.run_compress(NUMPY_COMPRESS, "alpha beta gamma delta epsilon", 0.6)
-        assert result.success
+        assert not result.success
 
     def test_empty_text(self, sandbox):
         result = sandbox.run_compress(SIMPLE_COMPRESS, "", 0.5)
@@ -382,9 +383,9 @@ class TestSmokeTest:
         assert not passed
         assert len(errors) == len(SmokeTest.SAMPLE_TEXTS)
 
-    def test_numpy_compress_passes(self, smoke_test):
+    def test_numpy_compress_blocked(self, smoke_test):
         passed, errors = smoke_test.run(NUMPY_COMPRESS)
-        assert passed, f"Unexpected errors: {errors}"
+        assert not passed
 
     def test_allowed_imports_compress_passes(self, smoke_test):
         passed, errors = smoke_test.run(ALLOWED_IMPORTS_COMPRESS)

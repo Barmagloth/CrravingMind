@@ -41,7 +41,6 @@ BASE_CONFIG = {
         "critical_starvation_pct": 0.10,
     },
     "memory": {
-        "graveyard_ttl_epochs": 10,
         "bible_max_weight_pct": 0.20,
     },
     "sandbox": {

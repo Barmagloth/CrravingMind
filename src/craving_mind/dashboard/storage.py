@@ -116,6 +116,8 @@ class MetricsStorage:
                     args_str = f"({text_len} chars, ratio={ratio:.2f})" if ratio is not None else f"({text_len} chars)"
                 elif name == "read_file":
                     args_str = f"({args.get('filename', '?')})"
+                elif name == "edit_file":
+                    args_str = "(compress.py)"
                 elif name == "run_script":
                     args_str = "(script)"
                 else:

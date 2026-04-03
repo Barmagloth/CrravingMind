@@ -4,6 +4,10 @@ import os
 import re
 
 
+# Maximum epitaphs kept in graveyard. Oldest are dropped when limit exceeded.
+_MAX_GRAVEYARD_ENTRIES = 5
+
+
 class MemoryManager:
     """Manages agent's persistent workspace files."""
 
@@ -19,7 +23,6 @@ def compress(s: str, target_ratio: float) -> str:
     def __init__(self, config: dict, agent_dir: str):
         self.config = config
         self.agent_dir = agent_dir
-        self.graveyard_ttl = config["memory"]["graveyard_ttl_epochs"]
         self.bible_max_weight_pct = config["memory"]["bible_max_weight_pct"]
         os.makedirs(agent_dir, exist_ok=True)
         self._seed_compress()
@@ -63,28 +66,25 @@ def compress(s: str, target_ratio: float) -> str:
         if prev_compress:
             self.write_file("compress.py", prev_compress)
         if prev_graveyard:
-            tagged = prev_graveyard.replace(
-                "<!-- AMENDMENT:", "<!-- AMENDMENT:inherited "
-            )
-            self.write_file("graveyard.md", tagged)
+            self.write_file("graveyard.md", prev_graveyard)
 
-    def cleanup_graveyard(self, current_epoch: int):
-        """Remove expired entries from graveyard (TTL-based)."""
-        content = self.read_file("graveyard.md")
-        if not content:
-            return
+    # ------------------------------------------------------------------
+    # Graveyard: compact format, one line per entry
+    # ------------------------------------------------------------------
+    # Format: "E<epoch> <pass>/<total> best:a=<x>,b=<y> | <last_words>"
+    # Example: "E3 0/10 best:a=0.88,b=0.60 | TF-IDF extraction peaked at a=0.88 but b never crossed 0.60"
 
-        # Parse amendment blocks: <!-- AMENDMENT:epoch=N --> ... <!-- /AMENDMENT -->
-        pattern = re.compile(
-            r"<!--\s*AMENDMENT[^>]*epoch=(\d+)[^>]*-->.*?<!--\s*/AMENDMENT\s*-->",
-            re.DOTALL,
-        )
+    @staticmethod
+    def parse_graveyard(content: str) -> list[str]:
+        """Parse graveyard into list of entry lines."""
+        if not content or not content.strip():
+            return []
+        return [line for line in content.strip().split("\n") if line.strip()]
 
-        def keep_block(m):
-            epoch_written = int(m.group(1))
-            if current_epoch - epoch_written > self.graveyard_ttl:
-                return ""
-            return m.group(0)
-
-        cleaned = pattern.sub(keep_block, content)
-        self.write_file("graveyard.md", cleaned)
+    def append_epitaph(self, entry_line: str):
+        """Append one epitaph line and trim to max entries."""
+        entries = self.parse_graveyard(self.read_file("graveyard.md"))
+        entries.append(entry_line.strip())
+        # Keep only the most recent entries.
+        entries = entries[-_MAX_GRAVEYARD_ENTRIES:]
+        self.write_file("graveyard.md", "\n".join(entries) + "\n")

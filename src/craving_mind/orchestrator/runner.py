@@ -82,13 +82,11 @@ class EpochRunner:
         self.budget.start_epoch(epoch, prev_success_rate, prev_saved, prev_oom)
         self._write_live_state(epoch, tasks_completed=0, tasks_total=len(tasks))
 
-        # Clean up expired graveyard entries (TTL).
-        self.memory.cleanup_graveyard(epoch)
-
         # 2. Backup memory for OOM rollback (Phase 2+).
         backup = self.memory.backup() if self.phase_manager.has_memory(epoch) else None
 
         # 3. Build system prompt and reset agent conversation.
+        self.agent.tools._phase = phase
         system_prompt = self._build_system_prompt(epoch, phase, crav_name)
         self.agent.start_epoch(epoch, system_prompt)
 
@@ -106,10 +104,16 @@ class EpochRunner:
 
             # Check control signals between tasks.
             ctrl = self._read_control()
+            if ctrl.get("stopped"):
+                self.logger.info("[Epoch %d] Stop signal — finishing epoch early", epoch)
+                break
             while ctrl.get("paused"):
                 import time
                 time.sleep(1)
                 ctrl = self._read_control()
+            if ctrl.get("stopped"):
+                self.logger.info("[Epoch %d] Stop signal — finishing epoch early", epoch)
+                break
 
             result = self._run_task(task, epoch, task_idx=task_idx, tasks_total=tasks_total)
             results.append(result)
@@ -464,56 +468,25 @@ class EpochRunner:
         self, epoch: int, completed: list, all_results: list,
         success_rate: float, has_artifact: bool,
     ) -> None:
-        """Write a brief epitaph for this epoch's agent to graveyard.md.
+        """Write a compact one-line epitaph to graveyard.md.
 
-        Asks the agent for last words (1 line: what it tried, why it failed),
-        then appends a structured epitaph block to graveyard.md.
+        Format: E<epoch> <pass>/<total> best:a=<x>,b=<y> | <last_words>
         """
-        crav_name = self.agent.crav_id
         n_passed = sum(1 for r in completed if r.get("passed"))
-        n_completed = len(completed)
         n_total = len(all_results)
 
-        # Cause of death.
-        if self.budget.is_oom:
-            cause = "OOM"
-        elif success_rate >= float(self.config.get("judge", {}).get("pass_threshold", 0.85)):
-            cause = "SURVIVED"
-        elif n_completed == 0:
-            cause = "instant OOM"
-        else:
-            cause = f"SR={success_rate:.0%}"
-
-        # Per-type breakdown.
-        by_type: dict[str, list[bool]] = {}
-        for r in completed:
-            t = r.get("hidden_type", "?")
-            by_type.setdefault(t, []).append(r.get("passed", False))
-        type_parts = []
-        for t, results in sorted(by_type.items()):
-            p = sum(results)
-            type_parts.append(f"{t}={p}/{len(results)}")
-        type_info = " ".join(type_parts) if type_parts else "no tasks"
-
-        artifact_tag = " | artifact exported" if has_artifact else ""
+        # Best scores achieved this epoch.
+        best_a = max((r.get("semantic_score", 0) for r in completed), default=0)
+        best_b = max((r.get("entity_score", 0) for r in completed), default=0)
 
         # Ask the agent for last words (what it tried, why it failed).
         last_words = self.agent.request_last_words()
 
-        lines = [
-            f"<!-- AMENDMENT:epoch={epoch} -->",
-            f"{crav_name} | E{epoch} | {n_passed}/{n_completed} pass"
-            f" ({n_total} queued) | {type_info} | died: {cause}{artifact_tag}",
-        ]
+        entry = f"E{epoch} {n_passed}/{n_total} best:a={best_a:.2f},b={best_b:.2f}"
         if last_words:
-            lines.append(last_words)
-        lines.append("<!-- /AMENDMENT -->")
+            entry += f" | {last_words}"
 
-        epitaph = "\n".join(lines) + "\n"
-
-        # Append to existing graveyard.
-        existing = self.memory.read_file("graveyard.md")
-        self.memory.write_file("graveyard.md", existing + epitaph)
+        self.memory.append_epitaph(entry)
 
     # ------------------------------------------------------------------
     # Live state

@@ -251,15 +251,22 @@ class CLIProvider(LLMProvider):
         # Try the happy path first: entire text is valid JSON.
         data = self._try_parse_json(text)
 
+        # Retry with repaired escapes (\s → \\s etc.) before expensive
+        # brace-counting extraction.
+        if data is None and text.startswith("{"):
+            data = self._try_parse_json(self._repair_json_escapes(text))
+
         if data is None:
             # Multi-turn roleplay: model continued past its first JSON object.
             # Find the first top-level {...} by brace-counting.
             data = self._extract_first_json_object(text)
 
         if data is None:
+            preview = raw_text[:300].replace('\n', '\\n')
             logger.warning(
-                "CLIProvider: could not parse any JSON from response (%d chars)",
-                len(raw_text),
+                "CLIProvider: could not parse any JSON from response "
+                "(%d chars): %.300s",
+                len(raw_text), preview,
             )
             return raw_text, []
 
@@ -276,9 +283,13 @@ class CLIProvider(LLMProvider):
 
     @staticmethod
     def _try_parse_json(text: str) -> dict | None:
-        """Try json.loads; return dict or None."""
+        """Try json.loads; return dict or None.
+
+        Uses strict=False to accept literal newlines inside JSON strings —
+        models often output code with real line breaks instead of \\n escapes.
+        """
         try:
-            data = json.loads(text)
+            data = json.loads(text, strict=False)
             if isinstance(data, dict):
                 return data
         except (json.JSONDecodeError, ValueError):
@@ -286,11 +297,39 @@ class CLIProvider(LLMProvider):
         return None
 
     @staticmethod
+    def _repair_json_escapes(text: str) -> str:
+        """Fix invalid JSON escape sequences produced by the model.
+
+        Models embedding code strings (regex patterns like \\s+, \\w+, \\d+)
+        often write them as \\s, \\w, \\d — which are not valid JSON escapes.
+        This doubles the backslash so json.loads accepts them.
+        """
+        _VALID_JSON_ESCAPES = frozenset('"\\/bfnrtu')
+        result: list[str] = []
+        i = 0
+        while i < len(text):
+            if text[i] == '\\' and i + 1 < len(text):
+                next_ch = text[i + 1]
+                if next_ch in _VALID_JSON_ESCAPES:
+                    result.append(text[i : i + 2])
+                else:
+                    # Invalid escape like \s → turn into \\s
+                    result.append('\\\\')
+                    result.append(next_ch)
+                i += 2
+            else:
+                result.append(text[i])
+                i += 1
+        return ''.join(result)
+
+    @staticmethod
     def _extract_first_json_object(text: str) -> dict | None:
         """Extract the first balanced {...} from text and parse it.
 
         Uses brace-counting with awareness of JSON string literals
-        (skips braces inside quoted strings).
+        (skips braces inside quoted strings).  If json.loads fails on
+        the extracted candidate, retries after repairing common invalid
+        escape sequences (\\s, \\w, etc. from code embedded in strings).
         """
         start = text.find("{")
         if start == -1:
@@ -326,14 +365,49 @@ class CLIProvider(LLMProvider):
                 if depth == 0:
                     candidate = text[start : i + 1]
                     try:
-                        data = json.loads(candidate)
+                        data = json.loads(candidate, strict=False)
                         if isinstance(data, dict):
                             return data
                     except (json.JSONDecodeError, ValueError):
                         pass
+                    # Retry with repaired escape sequences.
+                    try:
+                        repaired = CLIProvider._repair_json_escapes(candidate)
+                        data = json.loads(repaired, strict=False)
+                        if isinstance(data, dict):
+                            logger.debug(
+                                "CLIProvider: JSON parsed after escape repair"
+                            )
+                            return data
+                    except (json.JSONDecodeError, ValueError) as exc:
+                        logger.warning(
+                            "CLIProvider: balanced JSON found but unparseable "
+                            "even after repair (%d chars): %s — first 200: %.200s",
+                            len(candidate), exc,
+                            candidate[:200].replace('\n', '\\n'),
+                        )
                     return None
 
-        # Braces never balanced (truncated response). Not recoverable.
+        # Braces never balanced — either genuinely truncated, or the brace
+        # tracker lost sync (e.g. unescaped quotes in code strings).
+        # Fallback: try json.loads + repair on the entire text from '{'.
+        if start < len(text):
+            tail = text[start:]
+            for attempt_text in (tail, CLIProvider._repair_json_escapes(tail)):
+                try:
+                    data = json.loads(attempt_text, strict=False)
+                    if isinstance(data, dict):
+                        logger.debug(
+                            "CLIProvider: unbalanced braces but json.loads "
+                            "succeeded on tail (%d chars)", len(tail),
+                        )
+                        return data
+                except (json.JSONDecodeError, ValueError):
+                    pass
+            logger.debug(
+                "CLIProvider: braces never balanced, depth=%d at end "
+                "(%d chars from '{')", depth, len(tail),
+            )
         return None
 
     def chat(
@@ -364,7 +438,8 @@ class CLIProvider(LLMProvider):
         # definitions from the first call.  Re-sending them wastes ~900
         # tokens per call (system ~500 + tools ~400).  Only include them
         # on the very first call (no session_id yet).
-        if self._session_id is not None:
+        is_resumed = self._session_id is not None
+        if is_resumed:
             prompt = self._build_prompt(messages, tools=None, system="")
         else:
             prompt = self._build_prompt(messages, tools, system)
@@ -429,7 +504,8 @@ class CLIProvider(LLMProvider):
                         )
                         # Drop session so next attempt starts fresh.
                         self._session_id = None
-                        await asyncio.sleep(INITIAL_BACKOFF)
+                        wait = INITIAL_BACKOFF * (2 ** attempt)
+                        await asyncio.sleep(wait)
                         continue
                     return  # success — exit retry loop
                 except Exception as e:
@@ -460,7 +536,14 @@ class CLIProvider(LLMProvider):
         )
 
         # Estimate token usage from text length if SDK didn't report it.
-        input_tokens = usage_data.get("input_tokens") or max(1, len(prompt) // 4)
+        # The CLI SDK rarely reports input_tokens, so we estimate from the
+        # prompt we built.  For resumed sessions, the prompt only contains
+        # the new user message (tools/system omitted), which underestimates
+        # the real context but is the best local approximation we have.
+        if usage_data.get("input_tokens"):
+            input_tokens = usage_data["input_tokens"]
+        else:
+            input_tokens = max(1, len(prompt) // 4)
         output_tokens = usage_data.get("output_tokens") or max(1, len(raw_text) // 4)
 
         stop_reason = "tool_use" if tool_calls else "end_turn"
@@ -509,9 +592,16 @@ class AgentInterface:
         self._system_prompt: str = ""
 
     def start_epoch(self, epoch: int, system_prompt: str):
-        """Reset conversation for new epoch."""
+        """Reset conversation for new epoch.
+
+        Drops the CLI session so the next call starts fresh — the new agent
+        gets the updated system prompt, tool definitions, and graveyard
+        instead of inheriting behavioural ruts from the previous epoch.
+        """
         self.conversation = []
         self._system_prompt = system_prompt
+        if hasattr(self.provider, "new_session"):
+            self.provider.new_session()
 
     def send_task(self, source_text: str, target_ratio: float) -> dict:
         """Send a compression task to Crav. Returns the tool call results.
@@ -641,9 +731,9 @@ class AgentInterface:
         return text[:cut].rstrip(".,;:—- ") + "…"
 
     # Maximum LLM round-trips per _run_turn call (read → fix → compress → done).
-    _MAX_TOOL_ROUNDS = 6
+    _MAX_TOOL_ROUNDS = 3
     # Maximum fraction of remaining budget a single _run_turn may consume.
-    _MAX_TURN_BUDGET_FRACTION = 0.35
+    _MAX_TURN_BUDGET_FRACTION = 0.20
 
     def _run_turn(self) -> dict:
         """Execute one turn with a tool-use loop.
@@ -651,7 +741,7 @@ class AgentInterface:
         The agent may need several LLM round-trips to accomplish a task
         (e.g. read_file → write_file → run_compress).  We loop until the
         model stops requesting tools, the budget runs out, we hit
-        _MAX_TOOL_ROUNDS, or this turn consumed >35% of remaining budget.
+        _MAX_TOOL_ROUNDS, or this turn consumed >20% of remaining budget.
         """
         all_tool_calls: list = []
         all_tool_results: list = []
@@ -661,7 +751,7 @@ class AgentInterface:
         turn_budget_cap = int(self.budget.remaining * self._MAX_TURN_BUDGET_FRACTION)
 
         for _round in range(self._MAX_TOOL_ROUNDS):
-            max_tokens = max(1, min(4096, self.budget.remaining // 4))
+            max_tokens = max(512, min(4096, self.budget.remaining // 4))
 
             response = self.provider.chat(
                 messages=self.conversation,

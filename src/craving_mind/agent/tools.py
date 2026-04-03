@@ -9,9 +9,16 @@ class ToolsRegistry:
         self.memory = memory_manager
         self.budget = budget_manager
         self.smoke = smoke_test
+        self._phase: int = 1
 
     def get_tool_definitions(self) -> list:
         """Return Anthropic-format tool definitions."""
+        # bible.md is only available from Phase 2 onwards.
+        if self._phase >= 2:
+            rw_files = ["bible.md", "graveyard.md", "compress.py"]
+        else:
+            rw_files = ["graveyard.md", "compress.py"]
+
         return [
             {
                 "name": "run_compress",
@@ -27,13 +34,13 @@ class ToolsRegistry:
             },
             {
                 "name": "read_file",
-                "description": "Read a file from your workspace (bible.md, graveyard.md, compress.py).",
+                "description": "Read a file from your workspace.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
                         "filename": {
                             "type": "string",
-                            "enum": ["bible.md", "graveyard.md", "compress.py"],
+                            "enum": rw_files,
                         },
                     },
                     "required": ["filename"],
@@ -50,7 +57,7 @@ class ToolsRegistry:
                     "properties": {
                         "filename": {
                             "type": "string",
-                            "enum": ["bible.md", "graveyard.md", "compress.py"],
+                            "enum": rw_files,
                         },
                         "content": {"type": "string"},
                     },
@@ -60,8 +67,8 @@ class ToolsRegistry:
             {
                 "name": "edit_file",
                 "description": (
-                    "Replace a substring in compress.py. CHEAP — send only the changed part. "
-                    "old_string must match exactly (including whitespace)."
+                    "Replace a substring in compress.py. CHEAP — send only the changed lines. "
+                    "old_string must match exactly (including whitespace). Max 500 chars."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -107,7 +114,10 @@ class ToolsRegistry:
             }
 
         elif tool_name == "read_file":
-            content = self.memory.read_file(arguments["filename"])
+            filename = arguments["filename"]
+            if filename == "bible.md" and self._phase < 2:
+                return {"error": "bible.md is not available in Phase 1."}
+            content = self.memory.read_file(filename)
             return {"content": content}
 
         elif tool_name == "write_file":
@@ -142,6 +152,18 @@ class ToolsRegistry:
         elif tool_name == "edit_file":
             old_str = arguments.get("old_string", "")
             new_str = arguments.get("new_string", "")
+
+            # Reject oversized old_string — edit is for diffs, not full rewrites.
+            _MAX_OLD_STR = 500
+            if len(old_str) > _MAX_OLD_STR:
+                return {
+                    "success": False,
+                    "error": (
+                        f"old_string too long ({len(old_str)} chars, max {_MAX_OLD_STR}). "
+                        "Send only the lines you are changing, not the whole file. "
+                        "Use write_file for full rewrites."
+                    ),
+                }
 
             current = self.memory.read_file("compress.py")
             if not current:

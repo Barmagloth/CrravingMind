@@ -10,7 +10,7 @@ phases:
   phase3_start: 26
 
 budget:
-  base_tokens: 4000
+  base_tokens: 5000
   circuit_breaker_pct: 0.15
   venture_decay: 0.5
   rnd_lambda: 0.0001
@@ -19,16 +19,11 @@ budget:
   critical_starvation_pct: 0.10
 
 memory:
-  graveyard_ttl_epochs: 10
   bible_max_weight_pct: 0.20
 
 sandbox:
   timeout_seconds: 5
   allowed_imports:
-    - numpy
-    - sklearn
-    - spacy
-    - nltk
     - re
     - string
     - math
@@ -42,6 +37,9 @@ sandbox:
     - io
     - textwrap
     - unicodedata
+    - hashlib
+    - difflib
+    - struct
 
 benchmark:
   frozen_ratio: 0.7

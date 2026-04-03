@@ -28,7 +28,6 @@ BASE_CONFIG = {
         "critical_starvation_pct": 0.10,
     },
     "memory": {
-        "graveyard_ttl_epochs": 10,
         "bible_max_weight_pct": 0.20,
     },
     "sandbox": {
@@ -162,26 +161,27 @@ class TestMemoryManager:
         memory.init_from_inheritance(prev_compress=code)
         assert memory.read_file("compress.py") == code
 
-    def test_init_from_inheritance_graveyard_tagged(self, memory):
-        grave = "<!-- AMENDMENT: epoch=1 -->\nold idea\n<!-- /AMENDMENT -->"
+    def test_init_from_inheritance_graveyard(self, memory):
+        grave = "E0 0/10 best:a=0.88,b=0.30 | TF-IDF extraction\nE1 0/10 best:a=0.70,b=0.20 | prefix\n"
         memory.init_from_inheritance(prev_graveyard=grave)
         stored = memory.read_file("graveyard.md")
-        assert "inherited" in stored
+        assert "TF-IDF" in stored
+        assert "prefix" in stored
 
-    def test_cleanup_graveyard_removes_expired(self, memory):
-        content = (
-            "<!-- AMENDMENT epoch=1 -->\nold entry\n<!-- /AMENDMENT -->\n"
-            "<!-- AMENDMENT epoch=15 -->\nnew entry\n<!-- /AMENDMENT -->\n"
-        )
-        memory.write_file("graveyard.md", content)
-        memory.cleanup_graveyard(current_epoch=20)
-        remaining = memory.read_file("graveyard.md")
-        # epoch=1 is 19 epochs ago (> TTL=10), epoch=15 is 5 epochs ago (≤ TTL)
-        assert "old entry" not in remaining
-        assert "new entry" in remaining
+    def test_append_epitaph_trims_to_max(self, memory):
+        # Fill with 6 entries, should keep only last 5.
+        for i in range(6):
+            memory.append_epitaph(f"E{i} 0/10 best:a=0.50,b=0.10 | strategy {i}")
+        entries = memory.parse_graveyard(memory.read_file("graveyard.md"))
+        assert len(entries) == 5
+        assert "strategy 0" not in "\n".join(entries)
+        assert "strategy 5" in "\n".join(entries)
 
-    def test_cleanup_graveyard_empty(self, memory):
-        memory.cleanup_graveyard(current_epoch=5)  # no error on empty
+    def test_append_epitaph_empty_graveyard(self, memory):
+        memory.append_epitaph("E0 0/10 best:a=0.30,b=0.00 | naive stub")
+        entries = memory.parse_graveyard(memory.read_file("graveyard.md"))
+        assert len(entries) == 1
+        assert "naive stub" in entries[0]
 
 
 # ---------------------------------------------------------------------------
@@ -221,8 +221,15 @@ class TestToolsRegistry:
 
     def test_execute_read_file(self, registry, memory):
         memory.write_file("bible.md", "hello bible")
+        # bible.md requires phase >= 2
+        registry._phase = 2
         result = registry.execute("read_file", {"filename": "bible.md"})
         assert result["content"] == "hello bible"
+
+    def test_read_bible_blocked_phase1(self, registry, memory):
+        memory.write_file("bible.md", "hello bible")
+        result = registry.execute("read_file", {"filename": "bible.md"})
+        assert "error" in result
 
     def test_execute_write_file(self, registry, memory):
         registry.execute("write_file", {"filename": "compress.py", "content": "# code"})
@@ -627,6 +634,40 @@ class TestCLIProvider:
         content, calls = p._parse_response("not json at all")
         assert content == "not json at all"
         assert calls == []
+
+    def test_parse_response_repairs_invalid_escapes(self):
+        r"""edit_file with regex code (\s+, \w+) must parse after escape repair."""
+        p = CLIProvider()
+        # Model outputs \s+ and \w+ without double-escaping for JSON.
+        raw = (
+            'Thinking about strategy...\n'
+            '{"content": "", "tool_calls": [{"name": "edit_file", '
+            '"arguments": {"old_string": "re.split(r\'(?<=[.!?])\\s+\', s)", '
+            '"new_string": "re.findall(r\'\\w+\', s)"}}]}'
+        )
+        content, calls = p._parse_response(raw)
+        assert len(calls) == 1
+        assert calls[0]["name"] == "edit_file"
+        assert "\\s+" in calls[0]["arguments"]["old_string"]
+        assert "\\w+" in calls[0]["arguments"]["new_string"]
+
+    def test_parse_response_valid_escapes_untouched(self):
+        """Valid JSON escapes (\\n, \\t, \\") must not be double-escaped."""
+        p = CLIProvider()
+        raw = '{"content": "line1\\nline2\\t\\\"quoted\\\"", "tool_calls": []}'
+        content, calls = p._parse_response(raw)
+        assert content == 'line1\nline2\t"quoted"'
+
+    def test_parse_response_literal_newlines_in_code(self):
+        """Model outputs code with real line breaks instead of \\n escapes."""
+        p = CLIProvider()
+        # Simulate model outputting literal newlines in a write_file code arg
+        raw = '{"content": "", "tool_calls": [{"name": "write_file", "arguments": {"filename": "compress.py", "content": "import re\nfrom collections import Counter\n\ndef compress(s, r):\n    return s[:int(len(s)*r)]"}}]}'
+        content, calls = p._parse_response(raw)
+        assert len(calls) == 1
+        assert calls[0]["name"] == "write_file"
+        assert "import re" in calls[0]["arguments"]["content"]
+        assert "def compress" in calls[0]["arguments"]["content"]
 
     def test_build_prompt_includes_system(self):
         p = CLIProvider()

@@ -39,7 +39,7 @@ BASE_CONFIG = {
         "rnd_min_success_rate": 0.50,
         "critical_starvation_pct": 0.10,
     },
-    "memory": {"graveyard_ttl_epochs": 10, "bible_max_weight_pct": 0.20},
+    "memory": {"bible_max_weight_pct": 0.20},
     "sandbox": {"timeout_seconds": 5, "allowed_imports": ["re", "math"]},
     "judge": {
         "pass_threshold": 0.85,
@@ -980,14 +980,14 @@ class TestInheritance:
         mem.init_from_inheritance(prev_compress=prev_code)
         assert mem.read_file("compress.py") == prev_code
 
-    def test_init_from_inheritance_tags_graveyard(self, tmp_path):
+    def test_init_from_inheritance_stores_graveyard(self, tmp_path):
         cfg = BASE_CONFIG
         agent_dir = str(tmp_path / "agent")
         mem = MemoryManager(cfg, agent_dir)
-        grave = "<!-- AMENDMENT: epoch=1 -->\nold idea\n<!-- /AMENDMENT -->"
+        grave = "E0 0/10 best:a=0.88,b=0.30 | TF-IDF extraction"
         mem.init_from_inheritance(prev_graveyard=grave)
         stored = mem.read_file("graveyard.md")
-        assert "inherited" in stored
+        assert "TF-IDF" in stored
 
     def test_inheritance_compress_used_in_runner(self, tmp_path):
         """Inherited compress.py is written to agent dir; runner reads it for export."""
