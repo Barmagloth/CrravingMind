@@ -103,10 +103,12 @@ class ToolsRegistry:
     def execute(self, tool_name: str, arguments: dict) -> dict:
         """Execute a tool call and return result."""
         if tool_name == "run_compress":
+            text = arguments.get("text")
+            ratio = arguments.get("target_ratio")
+            if text is None or ratio is None:
+                return {"success": False, "error": "Missing required arguments: text, target_ratio"}
             compress_code = self.memory.read_file("compress.py")
-            result = self.sandbox.run_compress(
-                compress_code, arguments["text"], arguments["target_ratio"]
-            )
+            result = self.sandbox.run_compress(compress_code, text, ratio)
             return {
                 "success": result.success,
                 "output": result.return_value or "",
@@ -114,15 +116,19 @@ class ToolsRegistry:
             }
 
         elif tool_name == "read_file":
-            filename = arguments["filename"]
+            filename = arguments.get("filename")
+            if not filename:
+                return {"error": "Missing required argument: filename"}
             if filename == "bible.md" and self._phase < 2:
                 return {"error": "bible.md is not available in Phase 1."}
             content = self.memory.read_file(filename)
             return {"content": content}
 
         elif tool_name == "write_file":
-            filename = arguments["filename"]
-            content = arguments["content"]
+            filename = arguments.get("filename")
+            content = arguments.get("content")
+            if not filename or content is None:
+                return {"success": False, "error": "Missing required arguments: filename, content"}
 
             if filename == "bible.md" and self._phase < 2:
                 return {"error": "bible.md is not available in Phase 1."}
@@ -200,7 +206,10 @@ class ToolsRegistry:
             return {"success": True, "smoke_test": "PASSED"}
 
         elif tool_name == "run_script":
-            result = self.sandbox.run_script(arguments["code"], self.memory.agent_dir)
+            code = arguments.get("code")
+            if not code:
+                return {"success": False, "error": "Missing required argument: code"}
+            result = self.sandbox.run_script(code, self.memory.agent_dir)
             return {"success": result.success, "output": result.output, "error": result.error}
 
         elif tool_name == "audit_budget":
