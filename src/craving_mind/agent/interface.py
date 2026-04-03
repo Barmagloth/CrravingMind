@@ -513,7 +513,7 @@ class CLIProvider(LLMProvider):
         usage_data: dict = {}
 
         async def _run() -> None:
-            nonlocal usage_data
+            nonlocal usage_data, structured_data
             for attempt in range(MAX_RETRIES):
                 collected_text.clear()
                 structured_data = None
