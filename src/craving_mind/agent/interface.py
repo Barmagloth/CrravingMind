@@ -458,7 +458,7 @@ class CLIProvider(LLMProvider):
             env=env,
             resume=self._session_id,
             extra_args={
-                "--json-schema": json.dumps(self._RESPONSE_SCHEMA),
+                "json-schema": json.dumps(self._RESPONSE_SCHEMA),
             },
         )
 
