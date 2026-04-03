@@ -460,6 +460,9 @@ class CLIProvider(LLMProvider):
             permission_mode="bypassPermissions",
             env=env,
             resume=self._session_id,
+            extra_args={
+                "--json-schema": json.dumps(self._RESPONSE_SCHEMA),
+            },
         )
 
         MAX_RETRIES = 5
