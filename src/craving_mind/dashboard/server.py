@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 
 from craving_mind.dashboard.metrics import MetricsCollector
