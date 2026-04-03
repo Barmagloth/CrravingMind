@@ -600,15 +600,14 @@ class CLIProvider(LLMProvider):
                 len(content), len(tool_calls),
             )
 
-        # Estimate token usage from text length if SDK didn't report it.
-        # The CLI SDK rarely reports input_tokens, so we estimate from the
-        # prompt we built.  For resumed sessions, the prompt only contains
-        # the new user message (tools/system omitted), which underestimates
-        # the real context but is the best local approximation we have.
-        if usage_data.get("input_tokens"):
-            input_tokens = usage_data["input_tokens"]
-        else:
-            input_tokens = max(1, len(prompt) // 4)
+        # Always use our own estimate for input_tokens, NOT the SDK's.
+        # The Claude CLI's internal system prompt adds ~5000-15000 tokens
+        # of overhead that the agent can't control.  Charging those to the
+        # budget makes every call 5-10x more expensive than the agent's
+        # actual content, causing instant starvation.  Our estimate counts
+        # only what we send: prompt text + system_suffix (tools + system).
+        prompt_chars = len(prompt) + (len(system_suffix) if system_suffix else 0)
+        input_tokens = max(1, prompt_chars // 4)
         output_tokens = usage_data.get("output_tokens") or max(1, len(raw_text) // 4)
 
         stop_reason = "tool_use" if tool_calls else "end_turn"
