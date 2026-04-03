@@ -14,8 +14,8 @@
 **Q1.4. Tool use vs. текстовые команды**
 Текущая реализация в `agent/tools.py` — через tool use API (function calling). Вопрос: какой интерфейс для DIY-скриптов агента — отдельный tool `run_script(code)` или файловая операция `write_file` + `run_file`?
 
-**Q1.5. Управление контекстным окном агента**
-Каждая задача внутри эпохи — новый вызов LLM (stateless)? Или накапливаемый контекст? Spec подразумевает, что агент «знает» состояние бюджета через `[B:xxx|C:xxx]` в системном промпте — это подтверждает stateless-подход.
+**Q1.5. Управление контекстным окном агента** ✅ РЕШЕНО
+Свежая CLI-сессия на каждый `_run_turn()`. Внутри turn'а resumed session для tool loop (read → edit → run_compress). Между задачами conversation trimmed до последнего assistant summary (200 chars) + новые метрики. Агент восстанавливает контекст через `read_file`. Это даёт предсказуемые input tokens и надёжный structured output.
 
 ## 2. Judge / Scoring Pipeline
 

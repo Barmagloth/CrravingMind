@@ -807,7 +807,17 @@ class AgentInterface:
         (e.g. read_file → write_file → run_compress).  We loop until the
         model stops requesting tools, the budget runs out, we hit
         _MAX_TOOL_ROUNDS, or this turn consumed >20% of remaining budget.
+
+        Each turn starts a FRESH CLI session so that:
+        - --json-schema reliably produces StructuredOutput
+        - Input tokens are predictable (no accumulated session context)
+        - The turn budget cap can actually cap costs
         """
+        # Fresh session for this turn — rounds within the turn still
+        # resume the session via session_id for tool result delivery.
+        if hasattr(self.provider, "new_session"):
+            self.provider.new_session()
+
         all_tool_calls: list = []
         all_tool_results: list = []
         total_tokens = 0
@@ -817,6 +827,17 @@ class AgentInterface:
 
         for _round in range(self._MAX_TOOL_ROUNDS):
             max_tokens = max(1, min(4096, self.budget.remaining // 4))
+
+            # Skip if budget too tight for a meaningful structured response.
+            if max_tokens < 200:
+                logger.info(
+                    "Budget too low for LLM call (max_tokens=%d) — skipping",
+                    max_tokens,
+                )
+                # Mark budget as exhausted so OOM rollback triggers.
+                self.budget.spend(self.budget.remaining + 1)
+                alive = False
+                break
 
             response = self.provider.chat(
                 messages=self.conversation,

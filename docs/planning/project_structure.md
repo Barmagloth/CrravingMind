@@ -15,7 +15,8 @@ R:/Projects/CravingMind/
 ├── docs/
 │   ├── planning/                 # Планировочные документы (этот файл и другие)
 │   └── spec/
-│       └── craving_mind_spec_v1_6_1.md  # Техническое задание
+│       ├── craving_mind_spec_v1_6_1.md  # Техническое задание (исходная версия)
+│       └── craving_mind_spec_v1_7_0.md  # Техническое задание (текущая)
 ├── runs/                         # Артефакты экспериментов (не в git)
 │   └── run_<timestamp>/
 │       ├── checkpoint.json       # Состояние для возобновления
@@ -29,7 +30,8 @@ R:/Projects/CravingMind/
 ├── .env.example                  # Шаблон env-переменных
 ├── .gitignore
 ├── pyproject.toml                # Зависимости и метаданные пакета
-└── README.md
+├── README.md                     # Обзор проекта, быстрый старт, архитектура
+└── CLAUDE.md                     # Инструкции для AI-ассистентов (если создан)
 ```
 
 ---
@@ -43,11 +45,12 @@ src/craving_mind/
 │
 ├── agent/                        # LLM-агент и его инфраструктура
 │   ├── __init__.py
-│   ├── interface.py              # AgentInterface: вызов LLM, формирование промптов, скупой пульс [B:|C:]
+│   ├── interface.py              # AgentInterface + CLIProvider: LLM calls, structured output (--json-schema),
+│   │                             #   fresh session per turn, tool loop с resumed session, скупой пульс [B:|C:]
 │   ├── memory.py                 # Управление bible.md и graveyard.md (чтение/запись/валидация)
 │   ├── sandbox.py                # Изолированный запуск compress.py и DIY-скриптов (subprocess + timeout)
-│   └── tools.py                  # Tool definitions для function calling: run_compress, write_bible,
-│                                 #   read_bible, run_script, audit_budget, compact_bible
+│   └── tools.py                  # Tool definitions (phase-gated): run_compress, read_file, write_file,
+│                                 #   edit_file (diff-only, max 500 chars), run_script, audit_budget
 │
 ├── benchmark/                    # Сборка и загрузка бенчмарка
 │   ├── __init__.py
@@ -88,7 +91,8 @@ src/craving_mind/
 │   ├── __init__.py
 │   ├── metrics.py                # MetricsCollector: сбор и агрегация метрик эпохи
 │   ├── server.py                 # DashboardServer: FastAPI + WebSocket, HTTP endpoints,
-│                                 #   real-time push метрик
+│   │                             #   Live Console с файловыми вкладками, crav toggle preservation,
+│   │                             #   Charts (SR, Scores, Overfit, Tokens), Health, Controls
 │   └── storage.py                # MetricsStorage: SQLite, запись/чтение истории эпох
 │
 └── utils/                        # Общие утилиты
@@ -130,11 +134,11 @@ tests/
 ## Конфиг: `config/default.yaml`
 
 Единственный конфиг-файл. Покрывает:
-- **agent**: провайдер (anthropic/cli/mock), модель
+- **agent**: провайдер (anthropic/cli/mock), модель, cli_model
 - **phases**: границы фаз (11, 26)
-- **budget**: base_tokens=50000, circuit_breaker=15%, rnd_lambda=0.0001
-- **memory**: graveyard TTL=10, bible max_weight=20%
-- **sandbox**: timeout=5s, allowed_imports
+- **budget**: base_tokens=5000, circuit_breaker=15%, rnd_lambda=0.0001
+- **memory**: bible max_weight=20%
+- **sandbox**: timeout=5s, allowed_imports (stdlib only: re, math, collections, json, hashlib, difflib и др.)
 - **benchmark**: frozen_ratio=0.7, tasks_per_epoch=10, n_questions=10, dynamic_ratio=0.3
 - **judge**: pass_threshold=0.85, dynamic_multiplier=1.3, embeddings model, NER model, LLM model
 - **dashboard**: enabled=false, port=8080

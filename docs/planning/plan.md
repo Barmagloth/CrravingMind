@@ -142,7 +142,7 @@
 
 ---
 
-## Текущий статус (на 2026-03-31)
+## Текущий статус (на 2026-04-03)
 
 | Фаза | Статус | Ключевые файлы |
 |------|--------|----------------|
@@ -150,17 +150,27 @@
 | 1 — Judge | ✅ Готово | `judge/` (7 модулей) |
 | 2 — Benchmark | ✅ Готово | `benchmark/` (3 модуля) + 120 текстов |
 | 3 — Orchestrator | ✅ Готово | `orchestrator/` (budget, phases, checkpoint, artifacts) |
-| 4 — Agent | ✅ Готово | `agent/` (4 модуля) + CLIProvider |
+| 4 — Agent | ✅ Готово | `agent/` (4 модуля) + CLIProvider + StructuredOutput |
 | 5 — Runner | ✅ Готово | `orchestrator/runner.py`, `__main__.py` |
 | 6 — Drift | ✅ Готово | `judge/drift.py` |
-| 7 — Dashboard | ✅ Готово | `dashboard/` (3 модуля) |
-| 8 — Integration | ✅ Готово | `test_integration.py`, e2e validated |
+| 7 — Dashboard | ✅ Готово | `dashboard/` (3 модуля), Live Console + File Viewer объединены |
+| 8 — Integration | ✅ Готово | `test_integration.py`, 458 тестов, e2e validated |
+
+**Пройденные этапы после Фазы 8:**
+- Первые экспериментальные прогоны с CLI-провайдером (haiku)
+- Исправлен budget starvation: T1 не съедает весь бюджет эпохи (fresh session per turn)
+- Исправлен structured output на resumed sessions (CLI SDK StructuredOutput через --json-schema)
+- Phase-gated tools: bible.md недоступен в Phase 1 (enum + runtime guard)
+- edit_file: diff-only (max 500 chars old_string), smoke test перед сохранением
+- Dashboard: File Viewer объединён с Live Console как вкладки, crav toggle preservation
+- Graceful stop: проверка stopped между задачами и внутри pause loop
+- base_tokens снижен с 50000 до 5000 (калибровка под CLI)
+- Удалены numpy/sklearn/spacy/nltk из sandbox allowed_imports (только stdlib)
 
 **Следующие шаги:**
-1. Первый реальный прогон эксперимента (не Mock): `python -m craving_mind --config config/default.yaml`
-2. Ручная калибровка: запустить 10–20 эпох, проверить scoring на репрезентативность
-3. Принять решение по Q1.1 (модель агента: Haiku vs Sonnet) на основе первых данных
-4. Документация: CLAUDE.md для новых контрибьюторов
+1. Добиться, чтобы агент реально модифицировал compress.py (сейчас тратит токены на анализ, но не пишет код)
+2. Калибровка бюджета и turn budget cap для стабильных multi-task эпох
+3. Первая успешная эпоха с pass > 0
 
 ---
 

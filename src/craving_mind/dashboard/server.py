@@ -78,7 +78,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     flex: 1;
     display: grid;
     grid-template-columns: 240px 1fr 240px;
-    grid-template-rows: auto auto;
+    grid-template-rows: 1fr;
     gap: 10px;
     padding: 10px;
     padding-right: 10px;
@@ -161,11 +161,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   .log-drift { color: var(--warning); font-weight: 700; }
   .log-artifact { color: #c084fc; }
 
-  /* ---- File Viewer Panel ---- */
-  #file-viewer {
-    grid-column: 1 / 4;
-    display: flex; flex-direction: column;
-  }
+  /* ---- File Viewer (inside console panel) ---- */
   .fv-header { display: flex; align-items: center; gap: 0; flex-wrap: wrap; }
   .fv-tab {
     padding: 5px 14px; font-size: 11px; font-weight: 600; text-transform: uppercase;
@@ -175,19 +171,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .fv-tab:hover { background: var(--bg2); color: var(--text); }
   .fv-tab.active { background: var(--panel); color: var(--accent); border-color: var(--accent); }
-  .fv-controls { margin-left: auto; display: flex; align-items: center; gap: 10px; }
-  .fv-controls label { font-size: 11px; color: var(--text2); display: flex; align-items: center; gap: 5px; cursor: pointer; }
   #fv-version-select { background: var(--bg3); color: var(--text); border: 1px solid var(--border); padding: 2px 6px; border-radius: 4px; font-size: 11px; }
-  #fv-refresh-btn { background: var(--accent); color: #fff; border: none; padding: 4px 12px; border-radius: 4px; font-size: 11px; cursor: pointer; font-weight: 600; }
-  #fv-refresh-btn:hover { opacity: .85; }
-  .fv-body {
-    border: 1px solid var(--accent);
-    border-radius: 0 6px 6px 6px;
-    background: var(--bg);
-    overflow: hidden;
-    min-height: 200px;
-  }
-  .fv-scroll { overflow: auto; max-height: 320px; padding: 10px; }
+  .fv-scroll { overflow: auto; padding: 10px; }
   .fv-content { font-family: var(--mono); font-size: 12px; line-height: 1.6; white-space: pre; tab-size: 4; }
   /* Markdown */
   .md-h1 { color: var(--accent); font-size: 16px; font-weight: 800; margin: 8px 0 4px; font-family: var(--mono); }
@@ -209,7 +194,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   /* Collapse toggle */
   .collapse-btn { background: none; border: none; color: var(--muted); cursor: pointer; font-size: 16px; padding: 0 4px; }
   .collapse-btn:hover { color: var(--text); }
-  #fv-body-wrap { display: block; }
 
   /* ---- Scrollbars ---- */
   ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -268,19 +252,35 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   #console-toggle-btn:hover { background: var(--bg3); color: var(--text); }
   #console-header {
-    padding: 8px 12px;
     border-bottom: 1px solid var(--border);
     display: flex;
-    align-items: center;
-    gap: 8px;
+    flex-direction: column;
     flex-shrink: 0;
     background: var(--bg2);
   }
-  #console-header .panel-title {
+  #console-header .fv-header {
+    padding: 6px 10px 0;
     margin-bottom: 0;
-    flex: 1;
   }
-  #console-header .panel-title::after { display: none; }
+  #console-header .fv-tab {
+    font-size: 10px;
+    padding: 4px 10px;
+  }
+  .cp-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 10px;
+  }
+  #console-file-body {
+    flex: 1;
+    overflow: auto;
+    padding: 6px 8px;
+  }
+  #console-file-body .fv-scroll {
+    max-height: none;
+    height: 100%;
+  }
   .console-autoscroll-label {
     display: flex;
     align-items: center;
@@ -530,34 +530,6 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   </div>
 
-  <!-- FILE VIEWER PANEL -->
-  <div id="file-viewer" class="panel" style="padding:0; border-top: 2px solid var(--accent);">
-    <div style="padding: 10px 12px 0;">
-      <div class="fv-header">
-        <span class="fv-tab active" data-file="compress.py" onclick="fvSelectTab(this)">compress.py <span id="fv-ver-compress" style="font-size:10px;opacity:0.6"></span></span>
-        <span class="fv-tab" data-file="bible.md" onclick="fvSelectTab(this)">bible.md</span>
-        <span class="fv-tab" data-file="graveyard.md" onclick="fvSelectTab(this)">graveyard.md</span>
-        <span class="fv-tab" data-file="artifact" onclick="fvSelectTab(this)">Artifact</span>
-        <div class="fv-controls">
-          <select id="fv-version-select" onchange="fvLoadArtifact()" style="display:none">
-            <option value="">— version —</option>
-          </select>
-          <label>
-            <input type="checkbox" id="fv-auto-refresh"> Auto-refresh
-          </label>
-          <button id="fv-refresh-btn" onclick="fvRefresh()">↻ Refresh</button>
-          <button class="collapse-btn" onclick="fvToggle()" title="Toggle file viewer">▼</button>
-        </div>
-      </div>
-    </div>
-    <div id="fv-body-wrap">
-      <div class="fv-body">
-        <div class="fv-scroll">
-          <div class="fv-content" id="fv-content"><span style="color:var(--muted)">Select a file tab above to view its content.</span></div>
-        </div>
-      </div>
-    </div>
-  </div>
 
 </div><!-- /main -->
 
@@ -566,18 +538,40 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   <div id="console-drag-handle" title="Drag to resize"></div>
   <button id="console-toggle-btn" onclick="consoleToggle()" title="Collapse Live Console">▶</button>
   <div id="console-header">
-    <div class="panel-title">Live Console</div>
-    <label class="console-autoscroll-label" title="Auto-scroll to newest lines">
-      <input type="checkbox" id="console-autoscroll" checked>
-      Auto-scroll
-    </label>
-    <label class="console-autoscroll-label" title="Wrap long lines">
-      <input type="checkbox" id="console-wrap">
-      Wrap
-    </label>
-    <button id="console-clear-btn" onclick="consoleClear()">Clear</button>
+    <div class="fv-header">
+      <span class="fv-tab active" data-tab="console" onclick="cpSelectTab(this)">Console</span>
+      <span class="fv-tab" data-tab="compress.py" onclick="cpSelectTab(this)">compress.py <span id="fv-ver-compress" style="font-size:10px;opacity:0.6"></span></span>
+      <span class="fv-tab" data-tab="bible.md" onclick="cpSelectTab(this)">bible.md</span>
+      <span class="fv-tab" data-tab="graveyard.md" onclick="cpSelectTab(this)">graveyard.md</span>
+      <span class="fv-tab" data-tab="artifact" onclick="cpSelectTab(this)">Artifact</span>
+    </div>
+    <div id="console-controls" class="cp-controls">
+      <label class="console-autoscroll-label" title="Auto-scroll to newest lines">
+        <input type="checkbox" id="console-autoscroll" checked>
+        Auto-scroll
+      </label>
+      <label class="console-autoscroll-label" title="Wrap long lines">
+        <input type="checkbox" id="console-wrap">
+        Wrap
+      </label>
+      <button id="console-clear-btn" onclick="consoleClear()">Clear</button>
+    </div>
+    <div id="file-controls" class="cp-controls" style="display:none">
+      <select id="fv-version-select" onchange="fvLoadArtifact()" style="display:none">
+        <option value="">— version —</option>
+      </select>
+      <label class="console-autoscroll-label">
+        <input type="checkbox" id="fv-auto-refresh"> Auto-refresh
+      </label>
+      <button id="fv-refresh-btn" onclick="fvRefresh()" style="background:var(--accent);color:#fff;border:none;padding:2px 10px;border-radius:4px;font-size:10px;cursor:pointer;font-weight:600">↻</button>
+    </div>
   </div>
   <div id="console-body"></div>
+  <div id="console-file-body" style="display:none">
+    <div class="fv-scroll">
+      <div class="fv-content" id="fv-content"><span style="color:var(--muted)">Select a file tab to view content.</span></div>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -591,8 +585,8 @@ let logEntries = [];
 let seenEpochs = new Set();
 let fvCurrentFile = 'compress.py';
 let fvAutoTimer = null;
-let fvCollapsed = false;
 let artifactVersions = [];
+let cpActiveTab = 'console';
 // Track content hashes per file to detect actual changes.
 const fvHashes = {};     // filename → last seen hash
 const fvVersions = {};   // filename → version counter (1-based)
@@ -919,6 +913,33 @@ function consoleClear() {
   document.getElementById('console-body').innerHTML = '';
 }
 
+function cpSelectTab(el) {
+  document.querySelectorAll('#console-header .fv-tab').forEach(t => t.classList.remove('active'));
+  el.classList.add('active');
+  cpActiveTab = el.dataset.tab;
+
+  const consoleBody = document.getElementById('console-body');
+  const fileBody = document.getElementById('console-file-body');
+  const consoleCtrl = document.getElementById('console-controls');
+  const fileCtrl = document.getElementById('file-controls');
+  const vsel = document.getElementById('fv-version-select');
+
+  if (cpActiveTab === 'console') {
+    consoleBody.style.display = '';
+    fileBody.style.display = 'none';
+    consoleCtrl.style.display = '';
+    fileCtrl.style.display = 'none';
+  } else {
+    consoleBody.style.display = 'none';
+    fileBody.style.display = '';
+    consoleCtrl.style.display = 'none';
+    fileCtrl.style.display = '';
+    fvCurrentFile = cpActiveTab;
+    vsel.style.display = cpActiveTab === 'artifact' ? 'inline-block' : 'none';
+    fvRefresh();
+  }
+}
+
 function consoleColorClass(line) {
   if (line.startsWith('  \u2192 ')) return 'cl-tool';
   if (line.startsWith('  Crav:')) return 'cl-crav';
@@ -963,11 +984,30 @@ function cravToggle(el) {
 
 function consoleUpdate(lines) {
   if (!lines || !lines.length) return;
-  // If line count changed, rebuild; otherwise no-op for same lines
   if (lines.length === consoleLines.length) return;
   consoleLines = lines;
   const body = document.getElementById('console-body');
+
+  // Preserve expanded crav toggle states before rebuild.
+  const expandedSet = new Set();
+  body.querySelectorAll('.cl-crav').forEach((el, i) => {
+    const full = el.querySelector('.crav-full');
+    if (full && full.style.display !== 'none') expandedSet.add(i);
+  });
+
   body.innerHTML = lines.map(renderConsoleLine).join('');
+
+  // Restore expanded states.
+  if (expandedSet.size > 0) {
+    body.querySelectorAll('.cl-crav').forEach((el, i) => {
+      if (expandedSet.has(i)) {
+        const short = el.querySelector('.crav-short');
+        const full = el.querySelector('.crav-full');
+        if (short && full) { short.style.display = 'none'; full.style.display = ''; }
+      }
+    });
+  }
+
   const autoScroll = document.getElementById('console-autoscroll');
   if (autoScroll && autoScroll.checked) {
     body.scrollTop = body.scrollHeight;
@@ -1020,14 +1060,7 @@ document.getElementById('console-wrap').addEventListener('change', function() {
 // ============================================================
 // File Viewer
 // ============================================================
-function fvSelectTab(el) {
-  document.querySelectorAll('.fv-tab').forEach(t => t.classList.remove('active'));
-  el.classList.add('active');
-  fvCurrentFile = el.dataset.file;
-  const vsel = document.getElementById('fv-version-select');
-  vsel.style.display = fvCurrentFile === 'artifact' ? 'inline-block' : 'none';
-  fvRefresh();
-}
+// fvSelectTab removed — replaced by cpSelectTab in console panel.
 
 function fvFetch(url) {
   return fetch(url + '?_t=' + Date.now()).then(r => {
@@ -1079,11 +1112,9 @@ function fvLoadArtifact() {
 }
 
 function fvViewArtifact(version) {
-  // Switch to artifact tab and load that version
-  document.querySelectorAll('.fv-tab').forEach(t => t.classList.remove('active'));
-  document.querySelector('.fv-tab[data-file="artifact"]').classList.add('active');
-  fvCurrentFile = 'artifact';
-  document.getElementById('fv-version-select').style.display = 'inline-block';
+  // Switch to artifact tab in console panel and load that version.
+  const artTab = document.querySelector('#console-header .fv-tab[data-tab="artifact"]');
+  if (artTab) cpSelectTab(artTab);
   document.getElementById('fv-version-select').value = String(version);
   fvLoadArtifact();
 }
@@ -1115,15 +1146,9 @@ function fvDisplay(content, filename) {
   }
 }
 
-function fvToggle() {
-  fvCollapsed = !fvCollapsed;
-  document.getElementById('fv-body-wrap').style.display = fvCollapsed ? 'none' : 'block';
-  document.querySelector('.collapse-btn').textContent = fvCollapsed ? '▶' : '▼';
-}
-
-// Auto-refresh: refresh current tab content.
+// Auto-refresh: refresh current file tab content (only when a file tab is active).
 setInterval(() => {
-  if (document.getElementById('fv-auto-refresh').checked) fvRefresh();
+  if (document.getElementById('fv-auto-refresh').checked && cpActiveTab !== 'console') fvRefresh();
 }, 5000);
 
 // Always poll compress.py hash so the version badge updates
@@ -1279,8 +1304,7 @@ function setStatVal(id, txt, cls) {
 // ============================================================
 connect();
 
-// Initial file load
-fvRefresh();
+// Initial file load deferred — starts on Console tab.
 
 // Add info log entry on connect
 setTimeout(() => addLog(new Date().toLocaleTimeString(), '—', 'log-info', 'Dashboard connected — watching for epochs…'), 500);

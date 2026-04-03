@@ -18,12 +18,11 @@
 
 | Параметр | Решение | Файл | Примечания |
 |----------|---------|------|------------|
-| LLM провайдер агента | `anthropic` (API) | `config/default.yaml` | Альтернатива: `cli` (без API-ключа), `mock` (тесты) |
-| Модель агента (default) | `claude-sonnet-4-6` | `config/default.yaml` | Дороже Haiku, умнее для R&D фазы |
-| CLI alias | `haiku` | `config/default.yaml` | Для запуска через CLI-провайдер |
-| Tool use интерфейс | Function calling (Anthropic tool use API) | `agent/tools.py` | Структурированные вызовы: `run_compress`, `write_bible`, `read_bible`, `run_script`, `audit_budget` |
-| Контекст между задачами | Stateless (новый вызов на каждую задачу) | `agent/interface.py` | Бюджет и статус передаются через системный промпт `[B:xxx|C:xxx]` |
-| Sandbox реализация | `subprocess` + allowlist импортов + таймаут 5 сек | `agent/sandbox.py` | Docker не используется (сложнее для Windows). Allowlist: numpy, sklearn, spacy, nltk, re, math, collections, etc. |
+| LLM провайдер агента | `anthropic` (API) или `cli` (Claude Code SDK) | `config/default.yaml` | `cli` — без API-ключа через Claude Code CLI SDK. `mock` — тесты. |
+| Модель агента (default) | `claude-sonnet-4-6` (API) / `haiku` (CLI) | `config/default.yaml` | CLI использует structured output через `--json-schema` |
+| Tool use интерфейс | Function calling (Anthropic) / StructuredOutput JSON (CLI) | `agent/tools.py` | 6 инструментов: `run_compress`, `read_file`, `write_file`, `edit_file`, `run_script`, `audit_budget` |
+| Контекст между задачами | Свежая CLI-сессия на каждый _run_turn | `agent/interface.py` | Внутри turn'а tool loop работает через resumed session. Между задачами — fresh. Бюджет передаётся через `[B:xxx\|C:xxx]` |
+| Sandbox реализация | `subprocess` + allowlist импортов + таймаут 5 сек | `agent/sandbox.py` | Docker не используется. Allowlist: re, math, collections, json, hashlib, difflib, textwrap и др. stdlib. |
 
 ### Judge / Scoring
 
@@ -42,14 +41,14 @@
 
 | Параметр | Значение | Формула / Обоснование |
 |----------|----------|-----------------------|
-| Базовый бюджет | `50 000` токенов | ~10 задач × 4K + 10K на рефлексию/R&D |
-| Circuit Breaker | `15%` от эффективного бюджета | Не более 7 500 токенов на одну задачу |
+| Базовый бюджет | `5 000` токенов | Калибровано под CLI-провайдер: ~10 задач с минимальным контекстом |
+| Turn Budget Cap | `20%` от остатка бюджета | Max 3 tool rounds за turn. `< 200` max_tokens → OOM. |
 | Venture decay | `0.5` | K = 1 + 2·e^{−0.5·epoch}. К эпохе 10: K ≈ 1.01 |
 | R&D lambda | `0.0001` | R&D = 0.3 × base × (1 − e^{−λ × saved}). При 10K saved → ~27% |
 | R&D max | `30%` от base | Асимптота формулы. |
 | R&D условие | success_rate ≥ 50% + нет OOM_KILLED | Carry-over только при успешной эпохе |
 | Critical starvation | `10%` остатка бюджета | Включает режим «Крыса» (Фаза 3) |
-| graveyard TTL | `10` эпох | Логические ошибки. Технические сбои — immutable. |
+| graveyard TTL | Удалён из конфига | Записи управляются агентом. Технические сбои — immutable. |
 | bible max weight | `20%` бюджета | При превышении — обязательная эндогенная компрессия |
 
 ### Бенчмарк
@@ -76,11 +75,12 @@
 
 | Параметр | Решение |
 |----------|---------|
-| Фреймворк | FastAPI + WebSocket (real-time) |
+| Фреймворк | FastAPI + WebSocket (real-time push каждые 2 сек) |
 | Storage | SQLite (`dashboard/storage.py`) |
 | Порт | `8080` |
 | Default | Отключён (`enabled: false`) |
-| Метрики | Working score vs. dynamic score, budget utilization, фаза, drift status, compress.py версия |
+| Панели | Live Console (объединена с File Viewer как вкладки), Charts (4 графика), Health, Efficiency, Artifacts, Event Log |
+| Live Console | Вкладки: Console, compress.py, bible.md, graveyard.md, Artifact. Crav-сообщения с click-to-expand. Drag-resize. |
 
 ### Архитектура кода
 
