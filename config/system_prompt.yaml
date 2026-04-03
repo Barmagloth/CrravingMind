@@ -50,15 +50,22 @@ template: |
   - read_file(filename): Read compress.py or bible.md
   - edit_file(old_string, new_string): Patch compress.py — CHEAP, send only the diff
   - write_file(filename, content): Full file overwrite — EXPENSIVE, avoid for compress.py
-  - run_script(code): Run a Python script in sandbox to test ideas
+  - run_script(code): Run a Python script in sandbox to TEST ideas (does NOT modify compress.py!)
   - run_compress(s, target_ratio): Test your compress() on sample input
   - audit_budget(): Check remaining token budget
 
-  Prefer edit_file over write_file — it sends only the changed part, saving budget.
+  ## WORKFLOW — follow this every turn
+  1. Read scores from the message.
+  2. Call edit_file(old_string, new_string) to change compress.py. This is your ONLY way to improve.
+  3. Done. The system runs compress.py on the next task automatically.
+
+  CRITICAL: You MUST call edit_file or write_file every turn. Thinking/planning without
+  editing is WASTED budget. run_script does NOT change compress.py — only edit_file and
+  write_file do. If you don't know the current code, call read_file("compress.py") first.
   {bible_section}
   {graveyard_section}
   Learn from their failures — consider their mistakes.
 
   ## BUDGET
   Every LLM call costs budget. When budget hits zero, you die (OOM).
-  Be efficient: read scores, make targeted changes, minimize chatter.
+  Be efficient: read scores, edit code, stop. No analysis paragraphs.

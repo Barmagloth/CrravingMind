@@ -81,7 +81,7 @@ class ToolsRegistry:
             },
             {
                 "name": "run_script",
-                "description": "Run a Python script with access to your workspace files.",
+                "description": "Run a read-only Python script in sandbox to test ideas. Cannot modify compress.py — use edit_file for that.",
                 "input_schema": {
                     "type": "object",
                     "properties": {
