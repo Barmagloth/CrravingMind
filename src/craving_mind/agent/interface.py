@@ -600,15 +600,21 @@ class CLIProvider(LLMProvider):
                 len(content), len(tool_calls),
             )
 
-        # Always use our own estimate for input_tokens, NOT the SDK's.
-        # The Claude CLI's internal system prompt adds ~5000-15000 tokens
-        # of overhead that the agent can't control.  Charging those to the
-        # budget makes every call 5-10x more expensive than the agent's
-        # actual content, causing instant starvation.  Our estimate counts
-        # only what we send: prompt text + system_suffix (tools + system).
+        # Always use our OWN estimates for both input and output tokens.
+        #
+        # Input: SDK-reported input_tokens includes the Claude CLI's internal
+        # system prompt (~5000-15000 tokens) — overhead the agent can't control.
+        #
+        # Output: SDK-reported output_tokens includes extended thinking,
+        # StructuredOutput wrapper, and internal reasoning that can inflate
+        # a 300-token visible response to 3000-5000 real tokens.
+        #
+        # Charging either overhead to the budget causes instant starvation.
+        # Our estimates count only what we control: prompt + system_suffix
+        # for input, raw response text for output.
         prompt_chars = len(prompt) + (len(system_suffix) if system_suffix else 0)
         input_tokens = max(1, prompt_chars // 4)
-        output_tokens = usage_data.get("output_tokens") or max(1, len(raw_text) // 4)
+        output_tokens = max(1, len(raw_text) // 4)
 
         stop_reason = "tool_use" if tool_calls else "end_turn"
 

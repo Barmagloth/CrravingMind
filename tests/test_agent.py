@@ -762,7 +762,7 @@ class TestCLIProvider:
         # input_tokens is our own estimate (prompt + system_suffix) // 4,
         # NOT the SDK-reported value — avoids charging CLI overhead to budget.
         assert resp.usage["input_tokens"] > 0
-        assert resp.usage["output_tokens"] == 30
+        assert resp.usage["output_tokens"] > 0
         # Session ID captured for conversation continuity
         assert p._session_id == "sess-abc"
 
