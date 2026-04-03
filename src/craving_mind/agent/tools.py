@@ -68,7 +68,7 @@ class ToolsRegistry:
                 "name": "edit_file",
                 "description": (
                     "Replace a substring in compress.py. CHEAP — send only the changed lines. "
-                    "old_string must match exactly (including whitespace). Max 500 chars."
+                    "old_string must match exactly (including whitespace). Max 2000 chars."
                 ),
                 "input_schema": {
                     "type": "object",
@@ -163,7 +163,7 @@ class ToolsRegistry:
             new_str = arguments.get("new_string", "")
 
             # Reject oversized old_string — edit is for diffs, not full rewrites.
-            _MAX_OLD_STR = 500
+            _MAX_OLD_STR = 2000
             if len(old_str) > _MAX_OLD_STR:
                 return {
                     "success": False,

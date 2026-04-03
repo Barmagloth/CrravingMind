@@ -838,12 +838,17 @@ class AgentInterface:
                 alive = False
                 break
 
-            response = self.provider.chat(
-                messages=self.conversation,
-                tools=self.tools.get_tool_definitions(),
-                system=self._system_prompt,
-                max_tokens=max_tokens,
-            )
+            try:
+                response = self.provider.chat(
+                    messages=self.conversation,
+                    tools=self.tools.get_tool_definitions(),
+                    system=self._system_prompt,
+                    max_tokens=max_tokens,
+                )
+            except Exception as exc:
+                logger.error("LLM call failed in _run_turn round %d: %s", _round, exc)
+                # Treat as if the model returned nothing — don't crash the run.
+                break
 
             step_tokens = response.usage["input_tokens"] + response.usage["output_tokens"]
             total_tokens += step_tokens
