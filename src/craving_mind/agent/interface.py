@@ -180,13 +180,10 @@ class CLIProvider(LLMProvider):
                 "You have access to the following tools. "
                 "When you want to call a tool, respond ONLY with a JSON object "
                 "matching this exact schema — no markdown fences, no surrounding text:\n"
-                '{"content": "<brief note>", '
+                '{"content": "<your thinking>", '
                 '"tool_calls": [{"name": "<tool_name>", "arguments": {<args>}}]}\n'
                 "If you do NOT need to call a tool, respond with the same JSON schema "
                 'but with an empty tool_calls array: {"content": "<your reply>", "tool_calls": []}\n\n'
-                "CRITICAL: Keep your ENTIRE JSON response under 800 characters. "
-                "For edit_file, use the SHORTEST unique old_string (1-3 lines, not the whole function). "
-                "Keep content field to 1-2 sentences max.\n\n"
                 f"Available tools:\n{tool_specs}\n"
             )
         else:
