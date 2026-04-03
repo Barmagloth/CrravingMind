@@ -100,8 +100,42 @@ class ToolsRegistry:
             },
         ]
 
+    # Haiku often hallucinates tool names from Claude Code's native set.
+    _TOOL_ALIASES = {
+        "Edit": "edit_file",
+        "edit": "edit_file",
+        "Read": "read_file",
+        "read": "read_file",
+        "Write": "write_file",
+        "write": "write_file",
+        "Bash": "run_script",
+        "bash": "run_script",
+    }
+
+    # Common argument name mistakes for edit_file.
+    _EDIT_ARG_ALIASES = {
+        "old_code": "old_string",
+        "new_code": "new_string",
+        "old_text": "old_string",
+        "new_text": "new_string",
+        "old": "old_string",
+        "new": "new_string",
+        "find": "old_string",
+        "replace": "new_string",
+    }
+
     def execute(self, tool_name: str, arguments: dict) -> dict:
         """Execute a tool call and return result."""
+        # Normalize hallucinated tool names.
+        tool_name = self._TOOL_ALIASES.get(tool_name, tool_name)
+
+        # Normalize hallucinated argument names for edit_file.
+        if tool_name == "edit_file":
+            arguments = {
+                self._EDIT_ARG_ALIASES.get(k, k): v
+                for k, v in arguments.items()
+            }
+
         if tool_name == "run_compress":
             text = arguments.get("text")
             ratio = arguments.get("target_ratio")
